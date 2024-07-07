@@ -1,0 +1,19 @@
+name: ldrift
+channels:
+  - conda-forge
+dependencies:
+  - python =3.11
+  - numpy
+  - xarray
+  - netcdf4
+  - pandas
+  - dask
+  - dask-labextension
+  - pyarrow
+  - numba
+  - matplotlib
+  - cartopy
+  - cmocean
+  - tqdm
+  - scipy
+  - geopy
