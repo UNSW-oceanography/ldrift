@@ -14,7 +14,6 @@ import numpy as np
 
 import xarray as xr
 import pandas as pd
-import awkward as ak
 
 #from numba import njit
 
@@ -42,9 +41,6 @@ import pyproj
 from shapely.geometry import Point
 from shapely.geometry import box
 from shapely.geometry import Polygon
-from shapely.ops import cascaded_union
-#import rasterio
-#from rasterio.features import geometry_mask
 
 # Others
 from itertools import combinations
@@ -63,6 +59,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from matplotlib.ticker import MultipleLocator
+from matplotlib.ticker import FormatStrFormatter
 from matplotlib.ticker import MaxNLocator
 from matplotlib.ticker import FuncFormatter
 import cartopy.crs as ccrs
@@ -146,6 +143,25 @@ def get_dt(ds, ts: int = 3600) -> xr.Dataset:
     dt = xr.DataArray(dt_arr, coords={'ids': ds.ids}, dims=['obs']) 
 
     return ds.assign(dt=dt) # For dt using the gap variable, see 'Lukes old drifter codes'
+
+
+def find_index(arr, threshold, x):
+    """
+    Find the index of the first occurrence of a target value in an array, given a threshold.
+
+    Args:
+        arr (numpy.ndarray): The input array.
+        threshold (int or float): The threshold value.
+        x (int or float): The target value.
+
+    Returns:
+        int or float: The index of the first occurrence of the target value, or NaN if not found.
+    """
+    target_value = x - threshold # i.e., t_n + tau (minus because we use flipped values)
+    mask = arr == target_value  # Create a boolean mask for the condition
+    if np.any(mask):
+        return np.argmax(mask)  # Return the index of the first occurrence
+    return np.nan  # Return np.nan if no match is found
 
 
 def traj_cmap(traj, random_seed: int = 42) -> tuple[colors.ListedColormap, colors.BoundaryNorm]:
@@ -271,7 +287,7 @@ def drift_meta(ds, op_type: str = 'd'):
 
 
 def meta_series(ds: any = None, trajectory_data: any = None, max_days: int = 250,
-                total_trajs: int = 88, step_size: int = 30, omit: bool = True,
+                step_size: int = 30, omit: bool = True,
                 tick_scaler: any = 10) -> plt.figure:
     ''' Plots a time series of the number of drifters active by year
     
@@ -338,7 +354,7 @@ def meta_series(ds: any = None, trajectory_data: any = None, max_days: int = 250
             #percentile_cutoff = percentile / 100 * total_trajs
             #percentile_time = np.max(unique_times[counts >= percentile_cutoff])
 
-            print(label, 'total trajectories: ', total_trajs)
+            print(label, 'total trajectories: ', data['total_traj'])
             #print(percentile_cutoff)
             #print(percentile, 'percent of drifters were active at:', percentile_time)
 
@@ -360,7 +376,8 @@ def meta_series(ds: any = None, trajectory_data: any = None, max_days: int = 250
         plt.xscale('log')
         plt.xlabel('Time (Days)', fontsize=10)
         plt.ylabel('Number of Trajectories', fontsize=10)
-        plt.ylim(0, selected_counts[1] + tick_scaler)
+        #plt.ylim(0, selected_counts[1] + tick_scaler)
+        plt.ylim(0, tick_scaler)
         #plt.legend(fontsize=10)
         plt.grid(True, which='major', axis='both', linestyle='--', linewidth=0.5)
         #major_xticks = np.arange(0, max_days + 1, (5 * step_size) * max_days / tick_scaler)
@@ -438,7 +455,7 @@ def grid_data(points, u: any = None, v: any = None, total: any = None,
 
 def plot_meshgrid_on_map(df, grid_var, domain = [145,165,-45,-20], sigma=1.5,
                          cb_range: any = [1000, 80000], unit_conv = 1000,
-                         var_label = r'Diffusivity $m^2 s^{-1}$'):
+                         var_label = r'Diffusivity ($m^2 s^{-1}$)'):
 
     # Extract data from the DataFrame
     lon = df['lon'].values.reshape(len(np.unique(df['lat'])), -1)
@@ -523,8 +540,8 @@ def disp_tensor(ds, res: any = 0.25, domain = [145,165,-45,-20]):
     
     lon_lat_points = np.column_stack((ds.longitude.values, ds.latitude.values))
     total_velocity = np.sqrt(ds.ve.values ** 2 + ds.vn.values ** 2)
-    grid_df = grid_data(points=lon_lat_points, displacement=ds.displacement.values,
-                                     disp_x=ds.disp_x.values, disp_y=ds.disp_y.values,
+    grid_df = grid_data(points=lon_lat_points, displacement=ds.pt_d.values,
+                                     disp_x=ds.pt_x.values, disp_y=ds.pt_y.values,
                                      u=ds.ve.values, v=ds.vn.values, total=total_velocity,
                                      res=res, domain=domain)
     
@@ -549,9 +566,9 @@ def disp_tensor(ds, res: any = 0.25, domain = [145,165,-45,-20]):
     dev_totals = closest_totals - total_velocity
     u_deviations = ds.ve.values - closest_u
     v_deviations = ds.vn.values - closest_v
-    dev_displacement = abs(ds.displacement.values - closest_displacement)
-    x_deviations = abs(ds.disp_x.values - closest_disp_x)
-    y_deviations = abs(ds.disp_y.values - closest_disp_y)
+    dev_displacement = abs(ds.pt_d.values - closest_displacement)
+    x_deviations = abs(ds.pt_x.values - closest_disp_x)
+    y_deviations = abs(ds.pt_y.values - closest_disp_y)
 
     # Perform PCA on deviation arrays to decompose diff tensor 
     ##### DISPERSION TENSOR 'S' ###############
@@ -580,15 +597,13 @@ def disp_tensor(ds, res: any = 0.25, domain = [145,165,-45,-20]):
     k_s_yx = k_s_xy
 
     k_s_1, k_s_2 = np.linalg.eigh(np.array([[k_s_xx, k_s_xy], [k_s_yx, k_s_yy]]).transpose(2, 0, 1))
-    #temp_k = [k_s_2_i[1] for k_s_2_i in k_s_2]
-    #print(temp_k)
-    print(k_s_1[..., 0])
-    #print(k_s_1)
+    #print(k_s_1[..., 0])
 
     # Average the minor components of kjk and sjk to calculate lateral diffusivity
     k_star_2 = s_2
     k_2 = k_s_1[..., 0]
     lateral_diffusivity = 0.5 * (k_2 + k_star_2)
+    #lateral_diffusivity = k_s_1[..., 0]
     
     # Create new ds
     u_prime = xr.DataArray(u_deviations, coords={'ids': ds.ids}, dims=['obs'])
@@ -926,6 +941,8 @@ def retrieve_region(ds, lon: any = None, lat: any = None, min_time: any = None, 
     if wmos is not None: # Mask WMOs
         mask_id &= np.isin(ds.WMO, wmos)
 
+    mask_id &= ds.rowsize > 1 # Removes trajectories with less than two obs
+
     # update obs mask using the traj mask with consideration of the 'full' option
     full_mask = ds.ids.isin(ds.ID[mask_id]) # Determines if fulll trajectories should be used for drifters
                                             # that come into the domain - full trajs will align w/ traj_in
@@ -1010,18 +1027,9 @@ def segments(ds, Tl = 10):
 
     traj_idx, trajsum = get_traj_index(ds)
 
-    def find_and_duplicate_arrays(original_array, divisor):
-        indices = []
-        found_whole_numbers = set()
-
-        for i, value in enumerate(original_array):
-            if value >= divisor:
-                divided_value = value / divisor
-                if int(divided_value) not in found_whole_numbers:
-                    indices.append(i)
-                    found_whole_numbers.add(int(divided_value))
-
-        duplicated_arrays = [original_array] + [original_array[i:] for i in indices]
+    def find_and_duplicate_arrays(original_array, divisor, error = 24*3600):
+        indices = np.where(original_array % divisor == 0)[0]
+        duplicated_arrays = [original_array[i:] for i in indices]
 
         return indices, duplicated_arrays
     
@@ -1039,26 +1047,26 @@ def segments(ds, Tl = 10):
         ve = ds.ve[slice(traj_idx[i], trajsum[i])].values
         vn = ds.vn[slice(traj_idx[i], trajsum[i])].values
         dts = ds.dt[slice(traj_idx[i], trajsum[i])].values
-        rowsize = ds.rowsize[i].values
-        deploy_lat = ds.deploy_lat[i].values
-        deploy_lon = ds.deploy_lon[i].values
+        #rowsize = ds.rowsize[i].values
+        #deploy_lat = ds.deploy_lat[i].values
+        #deploy_lon = ds.deploy_lon[i].values
         
         # Append the original record
-        original_record = { 
-            "ID": xr.DataArray([traj], dims={"traj": [1]}),
-            "deploy_lon": xr.DataArray([deploy_lon], dims={"traj": [1]}),
-            "deploy_lat": xr.DataArray([deploy_lat], dims={"traj": [1]}),
-            "latitude": xr.DataArray([lats], dims={"traj": [1], "obs": np.arange(rowsize)}),
-            "longitude": xr.DataArray([lons], dims={"traj": [1], "obs": np.arange(rowsize)}),
-            "time": xr.DataArray([times], dims={"traj": [1], "obs": np.arange(rowsize)}),
-            "sst": xr.DataArray([ssts], dims={"traj": [1], "obs": np.arange(rowsize)}),
-            "ve": xr.DataArray([ve], dims={"traj": [1], "obs": np.arange(rowsize)}),
-            "vn": xr.DataArray([vn], dims={"traj": [1], "obs": np.arange(rowsize)})   
-        }
-        records.append(original_record)
+        #original_record = { 
+        #    "ID": xr.DataArray([traj], dims={"traj": [1]}),
+        #    "deploy_lon": xr.DataArray([deploy_lon], dims={"traj": [1]}),
+        #    "deploy_lat": xr.DataArray([deploy_lat], dims={"traj": [1]}),
+        #    "latitude": xr.DataArray([lats], dims={"traj": [1], "obs": np.arange(rowsize)}),
+        #    "longitude": xr.DataArray([lons], dims={"traj": [1], "obs": np.arange(rowsize)}),
+        #    "time": xr.DataArray([times], dims={"traj": [1], "obs": np.arange(rowsize)}),
+        #    "sst": xr.DataArray([ssts], dims={"traj": [1], "obs": np.arange(rowsize)}),
+        #    "ve": xr.DataArray([ve], dims={"traj": [1], "obs": np.arange(rowsize)}),
+        #    "vn": xr.DataArray([vn], dims={"traj": [1], "obs": np.arange(rowsize)})   
+        #}
+        #records.append(original_record)
 
         # Create new trajs
-        segment_indices, _ = find_and_duplicate_arrays(dts, Tl_sec)
+        segment_indices, _ = find_and_duplicate_arrays(dts, divisor=Tl_sec)
 
         # Iterate over segment_indices
         for j, seg_idx in enumerate(segment_indices):
@@ -1087,10 +1095,10 @@ def segments(ds, Tl = 10):
     new_ds = create_ragged_arr(records).to_xarray()
     
     #print(new_ds)
-    print('--------------------------------------------------------')
+    print('---------------- SEGMENTING DONE -----------------------')
 
     # Get dts and traj_cols
-    new_ds.rowsize.values = get_rowsize(ds=new_ds) # Shouldn't need this but adding in for safety
+    #new_ds.rowsize.values = get_rowsize(ds=new_ds) # Shouldn't need this but adding in for safety
     new_ds = get_dt(ds=new_ds)
     #new_ds = get_traj_cols(ds=new_ds)
     return new_ds
@@ -2095,7 +2103,18 @@ def cohort_pair_sep(ds, ddist0: float = 5, dt0: float = 6, start_dists: any = No
         dfs.append(pairsep)
     cps = pd.concat(dfs)
     
-    return cps
+    # Filter out pairs that are too far apart in time
+    def delta_filter(df, max_delta=7200, max_dt=100 * 24 * 3600):
+        # Calculate the time difference
+        df['time_diff'] = (df['time_second'] - df['time_first']).abs()
+        # Filter rows where the time difference is greater than 1 hour
+        filtered_df = df[df['time_diff'] <= max_delta]
+        filtered_df = filtered_df[filtered_df['dt'] <= max_dt]
+        # Drop the 'time_diff' column if it's no longer needed
+        filtered_df = filtered_df.drop(columns=['time_diff'])
+        return filtered_df[filtered_df['D2'] > 0]
+
+    return delta_filter(cps)
 
 
 def displacement_unused(ds, ID, debug : bool = False) -> dict:
@@ -2148,14 +2167,16 @@ def displacement_unused(ds, ID, debug : bool = False) -> dict:
     return df_dist
 
 
-def cohort_displace(ds, ts: int = 3600, debug : bool = False, sub_mean: bool = True) -> xr.Dataset:
+def cohort_displace(ds, tau = 20, debug : bool = False, sub_mean: bool = True) -> xr.Dataset:
     ''' Calculates cohort displacements (i.e., absolute dispersal)
         
         args:
-        ds: xarray dataset containing traj and obs dim'''
+        ds: xarray dataset containing traj and obs dim
+        tau: max time lag (in days) to integrate to - this will calculate the
+            displacement for a point in tau many days.'''
     
     # Define function to calculate geodesic distance between consecutive points
-    def per_chunk_displace(latitude, longitude, dt, threshold: float = 0, pt_disp: bool = False):
+    def per_chunk_displace(latitude, longitude, dt, threshold: float = 20, pt_disp: bool = False):
         initial_point = (latitude[0], longitude[0]) # Should really change order to match other funcs (lon, lat)
         points = list(zip(longitude, latitude))
         displacements = []
@@ -2164,9 +2185,8 @@ def cohort_displace(ds, ts: int = 3600, debug : bool = False, sub_mean: bool = T
         pt_displacements = []
         pt_zonals = []
         pt_meridionals = []
-        prev_displacement = 0
+        tau_idx = []
 
-        
         for i in range(len(longitude)): # Calculate dispersion and its components setting lat or lon constant or changing
             lon, lat = points[i]            
             point = (lat, lon)
@@ -2177,49 +2197,47 @@ def cohort_displace(ds, ts: int = 3600, debug : bool = False, sub_mean: bool = T
             
             # Calculate single point displacements (for mapping)
             if pt_disp:
-                if (i == len(longitude) - 1 or i == 0): # Set first and last pt displacement to nan 
-                    pt_displacement = np.nan
+                threshold_sec = threshold * 24 * 3600
+                points_inv = points[::-1]
+                #print('points')
+                #print(points)
+                #print('points_inv')
+                #print(points_inv)
+                dt_inv = dt[::-1]
+                #print('dt')
+                #print(dt)
+                #print('dt_inv')
+                #print(dt_inv)
+                dt_i = dt_inv[i]
+                tau_idx = find_index(dt_inv, threshold_sec, dt_i)
+                #print('tau_idx')
+                #print(tau_idx)
+
+                if (np.isnan(tau_idx)):  # Set pt displacement to nan where tau exceeds length of time series
+                    pt_displacement = np.nan # (i.e., first tau days are cut from the time series)
                     pt_zonal = np.nan
                     pt_meridional = np.nan
                 else:
-                    pt1 = points[i][::-1]
-                    pt2 = points[i + 1][::-1]
-                    pt_displacement = distance.geodesic(pt1, pt2).meters
-                    pt_zonal = distance.geodesic(pt1, (pt2[0], pt1[1])).meters
-                    pt_meridional = distance.geodesic(pt1, (pt1[0], pt2[1])).meters
-
-                # Find where timesteps are ~ 1 hr (3601 bcoz 1hrs = 7200s)
-                if i == 0 or i == len(longitude) - 1:
-                    pass
-                else:
-                    if dt[i + 1] - dt[i] < 3601:
-                        pass
-                    else:
-                        pt_displacement = np.nan
-                        pt_zonal = np.nan
-                        pt_meridional = np.nan
+                    point_inf_lon, point_inf_lat = points_inv[i] # lat(-t|t_0, x), lon(-t|t_0, x)
+                    pt2 = (point_inf_lat, point_inf_lon)
+                    inv_lon, inv_lat = points_inv[tau_idx]
+                    pt1 = (inv_lat, inv_lon)  #lat(t_0), lon(t_0)
+                    pt_displacement = distance.geodesic(pt1, pt2).km
+                    pt_zonal = distance.geodesic(pt1, (pt2[0], pt1[1])).km
+                    pt_meridional = distance.geodesic(pt1, (pt1[0], pt2[1])).km
             else:
                 pt_displacement = np.nan
                 pt_zonal = np.nan
                 pt_meridional = np.nan
 
-            # Test for erroneous values
-            if abs(displacement - prev_displacement) >= threshold:
-                displacements.append(displacement)
-                zonal_components.append(zonal_component)
-                meridional_components.append(meridional_component)
-                prev_displacement = displacement
-            else:
-                displacements.append(np.nan)
-                zonal_components.append(np.nan)
-                meridional_components.append(np.nan)
-                print('NaN encountered in displacement calculation')
-            
+            displacements.append(displacement)
+            zonal_components.append(zonal_component)
+            meridional_components.append(meridional_component)
             pt_displacements.append(pt_displacement)
             pt_zonals.append(pt_zonal)
             pt_meridionals.append(pt_meridional)
            
-        return displacements, zonal_components, meridional_components, pt_displacements, pt_zonals, pt_meridionals
+        return displacements, zonal_components, meridional_components, pt_displacements[::-1], pt_zonals[::-1], pt_meridionals[::-1]
         
     # Create a dataframe containing grided velocity averages for entire ds
     # (this is used to remove the background flow when calculating dispersion)
@@ -2237,8 +2255,11 @@ def cohort_displace(ds, ts: int = 3600, debug : bool = False, sub_mean: bool = T
     v_prime = []
     u_prime = []
     total_prime = []
+    pt_d = []
+    pt_x = []
+    pt_y = []
 
-    for i in tqdm(range(len(ds.traj))):  #Calc displacement for traj i
+    for i in range(len(ds.traj)):  #Calc displacement for traj i
         lat = ds.latitude[slice(traj_idx[i], trajsum[i])].values
         lon = ds.longitude[slice(traj_idx[i], trajsum[i])].values
         u = ds.ve[slice(traj_idx[i], trajsum[i])].values
@@ -2246,9 +2267,11 @@ def cohort_displace(ds, ts: int = 3600, debug : bool = False, sub_mean: bool = T
         dt = ds.dt[slice(traj_idx[i], trajsum[i])].values
         dt_diff_i = np.diff(dt)
         dt_diff_i = np.insert(dt_diff_i, dt[0], 0)
-        #print('-------------dt_diff----------------')
-        #print(dt_diff_i, len(dt_diff_i))
-        displacement_i, zonal_i, meridional_i, _, _, _ = per_chunk_displace(lat,lon,dt)
+
+        if tau is not None:
+            displacement_i, zonal_i, meridional_i, pt_displacement_i, pt_zonal_i, pt_meridional_i = per_chunk_displace(lat,lon,dt,tau,pt_disp=True)
+        else:
+            displacement_i, zonal_i, meridional_i, pt_displacement_i, pt_zonal_i, pt_meridional_i = per_chunk_displace(lat,lon,dt,pt_disp=False)
         
         if sub_mean:
             # Subtract 'background' flow by finding where each lat/lon falls in the gridded data
@@ -2289,6 +2312,16 @@ def cohort_displace(ds, ts: int = 3600, debug : bool = False, sub_mean: bool = T
         disp.append(displacement_i)
         zonal.append(zonal_i)
         meridional.append(meridional_i)
+        pt_d.append(pt_displacement_i)
+        pt_y.append(pt_zonal_i)
+        pt_x.append(pt_meridional_i)
+
+    pt_d = np.concatenate(pt_d)
+    pt_y = np.concatenate(pt_y)
+    pt_x = np.concatenate(pt_x)
+    pt_d = xr.DataArray(pt_d, coords={'ids': ds.ids}, dims=['obs'])
+    pt_x = xr.DataArray(pt_x, coords={'ids': ds.ids}, dims=['obs'])
+    pt_y = xr.DataArray(pt_y, coords={'ids': ds.ids}, dims=['obs'])
 
     ret = np.concatenate(disp)
     ret2 = np.concatenate(zonal)
@@ -2301,21 +2334,26 @@ def cohort_displace(ds, ts: int = 3600, debug : bool = False, sub_mean: bool = T
     A2_diff = np.diff(A2) # Multiply by 1000 to convert to m / s
     d_A2 = 0.5 * (A2_diff / time_diff) # Diffusivity
     # Prepend 0 to the derivative array to account for the initial condition at t0
-    d_A2 = np.insert(d_A2, 0, 0) 
+    d_A2 = np.insert(d_A2, 0, 0)
+    d_A2 = xr.DataArray(d_A2, coords={'ids': ds.ids}, dims=['obs'])
     
     # Create a new DataArray for meridional dispersion
-    disp_x = xr.DataArray(ret3, coords={'ids': ds.ids, 'obs': ds.obs}, dims=['obs'])
+    #disp_x = xr.DataArray(ret3, coords={'ids': ds.ids, 'obs': ds.obs}, dims=['obs'])
+    disp_x = xr.DataArray(ret3, coords={'ids': ds.ids}, dims=['obs'])
     disp_x2 = disp_x**2
     x2_diff = np.diff(disp_x2) # Multiply by 1000 to convert to m / s
     d_x2 = 0.5 * (x2_diff / time_diff) # Zonal Diffusivity
-    d_x2 = np.insert(d_x2, 0, 0) 
+    d_x2 = np.insert(d_x2, 0, 0)
+    d_x2 = xr.DataArray(d_x2, coords={'ids': ds.ids}, dims=['obs']) 
     
     # Create a new DataArray for zonal dispersion
-    disp_y = xr.DataArray(ret2, coords={'ids': ds.ids, 'obs': ds.obs}, dims=['obs'])
+    #disp_y = xr.DataArray(ret2, coords={'ids': ds.ids, 'obs': ds.obs}, dims=['obs'])
+    disp_y = xr.DataArray(ret2, coords={'ids': ds.ids}, dims=['obs'])
     disp_y2 = disp_y**2
     y2_diff = np.diff(disp_y2) # Multiply by 1000 to convert to m / s
     d_y2 = 0.5 * (y2_diff / time_diff) # Meridional Diffusivity
     d_y2 = np.insert(d_y2, 0, 0)
+    d_y2 = xr.DataArray(d_y2, coords={'ids': ds.ids}, dims=['obs'])
 
     if sub_mean:
         ret4 = np.concatenate(u_prime)
@@ -2331,13 +2369,13 @@ def cohort_displace(ds, ts: int = 3600, debug : bool = False, sub_mean: bool = T
                            disp_y=disp_y, disp_x2=disp_x2, disp_y2=disp_y2,
                            d_A2=d_A2, d_x2=d_x2, d_y2=d_y2,
                            total_prime=total_prime, v_prime=v_prime,
-                           u_prime=u_prime
+                           u_prime=u_prime, pt_x=pt_x, pt_y=pt_y, pt_d=pt_d
                            )
     else:
         # Add new data to original dataset
         new_ds = ds.assign(displacement=displacement, A2=A2, disp_x=disp_x,
                            disp_y=disp_y, disp_x2=disp_x2, disp_y2=disp_y2,
-                           d_A2=d_A2, d_x2=d_x2, d_y2=d_y2
+                           d_A2=d_A2, d_x2=d_x2, d_y2=d_y2, pt_x=pt_x, pt_y=pt_y, pt_d=pt_d
                            )
 
     return new_ds  # Return the new dataset
@@ -2382,8 +2420,8 @@ def lagrangian_autocorr(velocities_list, u, v):
     return autocorrs, zonals, merids
 
 
-def get_velocities(ds, primes: bool = True):
-    traj_idx, trajsum = ld.get_traj_index(ds=ds)
+def get_velocities(ds, tinf = 200.0, primes: bool = True):
+    traj_idx, trajsum = get_traj_index(ds=ds)
 
     velocities = []
     velocity_devs = []
@@ -2391,7 +2429,7 @@ def get_velocities(ds, primes: bool = True):
     v_devs = []
     traj_dts = []
 
-    for i in range(len(ds.traj.values)):
+    for i in range(len(ds.traj.values)): # Seperate trajectories into individual arrays
         if primes:
             devs_tot_i = ds.total_prime[slice(traj_idx[i], trajsum[i])].values
             devs_u = ds.u_prime[slice(traj_idx[i], trajsum[i])].values
@@ -2399,12 +2437,22 @@ def get_velocities(ds, primes: bool = True):
         velocities_tot_i = ds.v_total[slice(traj_idx[i], trajsum[i])].values
         traj_dt_i = ds.dt[slice(traj_idx[i], trajsum[i])].values / 3600 / 24
 
-        if primes:
-            velocity_devs.append(devs_tot_i)
-            u_devs.append(devs_u)
-            v_devs.append(devs_v)
-        velocities.append(velocities_tot_i)
-        traj_dts.append(traj_dt_i)
+        # Cut each traj at tinf or set to na if not found
+        tinf_idx = find_index(arr=traj_dt_i, x=tinf, threshold=0)
+        if np.isnan(tinf_idx):
+            continue
+        else:
+            velocities_tot_i = velocities_tot_i[:tinf_idx]
+            traj_dt_i = traj_dt_i[:tinf_idx]
+            velocities.append(velocities_tot_i)
+            traj_dts.append(traj_dt_i)
+            if primes:
+                devs_tot_i = devs_tot_i[:tinf_idx]
+                devs_u = devs_u[:tinf_idx]
+                devs_v = devs_v[:tinf_idx]
+                velocity_devs.append(devs_tot_i)
+                u_devs.append(devs_u)
+                v_devs.append(devs_v)
 
     return velocities, velocity_devs, u_devs, v_devs, traj_dts
 
@@ -2508,9 +2556,9 @@ def plot_autocorrelations(velocities_list, u_list, v_list, times_list, max_x=20)
     ax2.axhline(y=max(int_times), color='steelblue', linestyle='--', zorder=10)
 
     # Show y ticks every two ticks
-    ax2.yaxis.set_major_locator(MultipleLocator(0.2))
+    ax2.yaxis.set_major_locator(MultipleLocator(0.25))
     ax2.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
-    ax2.set_ylim(0, 0.9)
+    ax2.set_ylim(0, 1.5)
 
     ax2.set_xlabel('Time lag (days)', fontsize=10)
     ax2.set_ylabel('Timescale (days)', fontsize=10)
@@ -2770,7 +2818,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
 
     # Find time intervals to average over
     unique_x_values = np.unique((ds.dt.values)/3600/24)
-    non_zeros = np.logical_and((unique_x_values != 0), (unique_x_values < max_dt))
+    non_zeros = np.logical_and((unique_x_values > 0), (unique_x_values < max_dt))
     unique_x_values = unique_x_values[non_zeros]
     #print(unique_x_values, len(unique_x_values))
 
@@ -2781,7 +2829,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
         ci_upper = []
 
         for x_value in unique_x_values:
-            values = ds.A2.values[(ds.dt.values)/3600/24 == x_value]
+            values = abs(ds.A2.values[(ds.dt.values)/3600/24 == x_value])
             mean_A2_value = np.nanmean(values)
             mean_A2_values.append(mean_A2_value)
 
@@ -2842,40 +2890,41 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
     results = [] # Initialise results outside of condition so that function still returns something
     if bool(disp_funcs): # Show theoretical slopes on plot
         for count, f_type in enumerate(disp_funcs):
-            # Extract desired time range and y values to plot 
-            t_vals = [t for t in unique_x_values if disp_funcs[f_type]['range'][0] <= t <= disp_funcs[f_type]['range'][1]]
-            t_vals_idx = np.isin((ds.dt.values/3600/24), t_vals)
-            t_vals_idx = np.where(t_vals_idx)[0]
-            test_t_vals = (ds.dt.values/3600/24)[t_vals_idx]
-            test_y_vals = ds.A2.values[t_vals_idx] # Extract dispersion vals
+            if disp_funcs[f_type]['range'][1] != disp_funcs[f_type]['range'][0]: # If the range is the same, then it won't plot
+                # Extract desired time range and y values to plot 
+                t_vals = [t for t in unique_x_values if disp_funcs[f_type]['range'][0] <= t <= disp_funcs[f_type]['range'][1]]
+                t_vals_idx = np.isin((ds.dt.values/3600/24), t_vals)
+                t_vals_idx = np.where(t_vals_idx)[0]
+                test_t_vals = (ds.dt.values/3600/24)[t_vals_idx]
+                test_y_vals = ds.A2.values[t_vals_idx] # Extract dispersion vals
 
-            # Find line of best fit
-            print(f_type)
+                # Find line of best fit
+                print(f_type)
 
-            if ((df_bool) and (f_type == 'exp:f0')): # Automatically add an exponential for relative dispersal
-                reg_results, fitted_vals = fit_trends(x=test_t_vals, y=test_y_vals, plot=False, exp=True)
+                if ((df_bool) and (f_type == 'exp:f0')): # Automatically add an exponential for relative dispersal
+                    reg_results, fitted_vals = fit_trends(x=test_t_vals, y=test_y_vals, plot=False, exp=True)
 
-                #if theoretical:
-                #    ## Find theoretical distribution
-                #    theoretical_vals = t_funcs(a=reg_results['intercept'][0] + 1000, time=t_vals + disp_funcs[f_type]['range'][0], b=disp_funcs[f_type]['power'], exp=True)
+                    #if theoretical:
+                    #    ## Find theoretical distribution
+                    #    theoretical_vals = t_funcs(a=reg_results['intercept'][0] + 1000, time=t_vals + disp_funcs[f_type]['range'][0], b=disp_funcs[f_type]['power'], exp=True)
 
-            else:
-                reg_results, fitted_vals = fit_trends(x=test_t_vals, y=test_y_vals, plot=False)
+                else:
+                    reg_results, fitted_vals = fit_trends(x=test_t_vals, y=test_y_vals, plot=False)
 
-                #if theoretical:
-                #    # Find theoretical distribution
-                #    theoretical_vals = t_funcs(a=reg_results['intercept'][0] + 1000, time=t_vals  + disp_funcs[f_type]['range'][0], b=disp_funcs[f_type]['power'])
+                    #if theoretical:
+                    #    # Find theoretical distribution
+                    #    theoretical_vals = t_funcs(a=reg_results['intercept'][0] + 1000, time=t_vals  + disp_funcs[f_type]['range'][0], b=disp_funcs[f_type]['power'])
 
-            # Add in regression line        
-            if best_fit:
-                #print(f"fitted values {fitted_vals[0], fitted_vals[1]} for func {f_type}")
-                ax.plot(fitted_vals[0], fitted_vals[1],
-                    label=f'{f_type}: Best fit dt < {disp_funcs[f_type]["range"][1]}: b={reg_results["slope"].values}',
-                    c='steelblue', linestyle='-')
-                
-                mid_index = len(fitted_vals[0]) // 2
-                ax.text(fitted_vals[0][mid_index], fitted_vals[1][mid_index] + 1000, f'm={reg_results["slope"][0]:.2f}',
-                        fontsize=9, ha='center', va='bottom')
+                # Add in regression line        
+                if best_fit:
+                    #print(f"fitted values {fitted_vals[0], fitted_vals[1]} for func {f_type}")
+                    ax.plot(fitted_vals[0], fitted_vals[1],
+                        label=f'{f_type}: Best fit dt < {disp_funcs[f_type]["range"][1]}: b={reg_results["slope"].values}',
+                        c='steelblue', linestyle='-')
+
+                    mid_index = len(fitted_vals[0]) // 2
+                    ax.text(fitted_vals[0][mid_index], fitted_vals[1][mid_index] + 1000, f'm={reg_results["slope"][0]:.2f}',
+                            fontsize=9, ha='center', va='bottom')
 
             if (theoretical) and (f_type != 'exp:f0'):
                 # Plot theoretical trendlines
@@ -3346,8 +3395,8 @@ def pair_driftplot(df_list, ds: any = None, labels: list = ['20-40 km', '10-20 k
 
 def rel_disp(ds) -> pd.DataFrame:
     ''' Calculates the separation distance between all drifter pairs and calculates the
-        relative dispersion. NOTE: this function finds ALL pairs so it can be quite slow
-        if given a large amount of data.
+        relative dispersion. NOTE: this function finds ALL pairs in time, so it can be 
+        quite slow if given a large amount of data.
          '''
     
     def find_active_trajs(ds):
@@ -3528,7 +3577,42 @@ def compute_fsle(df, threshold_rate=1.2, initial_distance=0.01):
             fsle_data.append({'ID_marker': pair_id, 'separation_distance': threshold, 'fsle': fsle})
 
     fsle_df = pd.DataFrame(fsle_data)
-    return fsle_df
+
+    def filter_separations(separations):
+
+        def has_time_info(date_str):
+            try:
+                pd.to_datetime(date_str, format='%Y-%m-%d %H:%M:%S')
+                return True
+            except ValueError:
+                return False
+
+        separations['dt'] = separations['dt'] / 3600 / 24
+        # Filter out rows where 'time_first' or 'time_second' do not include time information
+        df = separations[separations['time_first'].apply(has_time_info) & separations['time_second'].apply(has_time_info)]
+
+        # Check if 'time_first' is not datetime and convert if necessary
+        if not np.issubdtype(df['time_first'].dtype, np.datetime64):
+            df['time_first'] = pd.to_datetime(df['time_first'])
+
+        # Check if 'time_second' is not datetime and convert if necessary
+        if not np.issubdtype(df['time_second'].dtype, np.datetime64):
+            df['time_second'] = pd.to_datetime(df['time_second'])
+
+        # Calculate the time difference
+        df['time_diff'] = (df['time_second'] - df['time_first']).abs()
+
+        # Filter rows where the time difference is greater than 1 hour
+        filtered_df = df[df['time_diff'] <= pd.Timedelta(hours=1)]
+
+        # Drop the 'time_diff' column if it's no longer needed
+        filtered_df = filtered_df.drop(columns=['time_diff'])
+
+        print(len(filtered_df))
+        print(len(separations))
+        return filtered_df
+
+    return filter_separations(fsle_df)
 
 
 def calculate_cist(df, r_thresh=0.5, initial_distance=0.01, alpha=1.2):
