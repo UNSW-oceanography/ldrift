@@ -20,5 +20,5 @@ All the functions can then be accessed and the example notebook run through your
 Matisons, Luke. (2024). ldrift: scripts to analyse Lagrangian drifter data.
 
 ## Other useful repositories
-+Many of the ldrift functions are modified from or are built upon the original GDP analysis code by Elipot et al in the [clouddrift](https://github.com/Cloud-Drift/clouddrift) repository.
-+Future updates to ldrift will include more functionality with simulated drifter data generated through particle tracking models, such as Opendrift. The repository for Opendrift can be accessed [here](https://github.com/OpenDrift), or visit the [website](https://opendrift.github.io/).
+- Many of the ldrift functions are modified from or are built upon the original GDP analysis code by Elipot et al in the [clouddrift](https://github.com/Cloud-Drift/clouddrift) repository.
+- Future updates to ldrift will include more functionality with simulated drifter data generated through particle tracking models, such as Opendrift. The repository for Opendrift can be accessed [here](https://github.com/OpenDrift), or visit the [website](https://opendrift.github.io/).
