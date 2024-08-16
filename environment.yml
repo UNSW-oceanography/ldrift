@@ -7,13 +7,25 @@ dependencies:
   - xarray
   - netcdf4
   - pandas
+  - geopandas
   - dask
   - dask-labextension
   - pyarrow
+  - shapely
   - numba
   - matplotlib
+  - mpl_toolkits
   - cartopy
+  - colormaps
   - cmocean
   - tqdm
   - scipy
+  - sklearn
   - geopy
+  - piecewise_regression
+  - pwlf
+  - itertools
+  - os
+  - pyproj
+  - glob
+  - PIL
