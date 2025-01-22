@@ -22,6 +22,7 @@ from scipy.interpolate import griddata
 from scipy.interpolate import interp1d
 from scipy.spatial import cKDTree
 from scipy.ndimage import gaussian_filter
+from pykrige.ok import OrdinaryKriging
 from pwlf import PiecewiseLinFit
 from sklearn.decomposition import PCA # PCA for generating diffusivity tensors
 from sklearn.impute import SimpleImputer # For dealing with NaNs during PCA
@@ -45,6 +46,9 @@ import os
 import datetime as datetime
 import glob
 import warnings
+# For data retrieval
+from urllib.parse import quote
+from urllib.parse import urlparse
 
 # visualization
 import matplotlib as mpl
@@ -64,10 +68,108 @@ import colormaps as cmaps
 import matplotlib.animation as animation # For animations
 from PIL import Image # For animations
 
+
 # For ragged array construction
 from ldrift.preproc import create_ragged_arr
 
 ## =================== FUN-CTIONS - so called because they are Fun, not Necessarily "functional" =========== ##
+
+def getdrift_ncdf(platform_code: str = None, input_time = [datetime.datetime(2023,10,1,0,0,0,0),datetime.datetime(2024,2,1,0,0,0,0)],
+                    latlon = [-50, -30, 140, 160]) -> pd.DataFrame:
+    ''' Function to get drifter data from url - return ids latitudes,longitudes,and times in a contiguous ragged array
+        (GDP format). Input_time can either contain two values: start_time & end_time or one value as an interval
+        example: input_time=[datetime(2012,1,1,0,0,0,0),datetime(2012,2,1,0,0,0,0)]
+    '''
+    
+    # Default IDs: "5501712|5501713|5501714|5501715|5501716|5501717|5501718|5501719|5501720|5501721|6801910|7801732|2802102|5802100|5802099|6801911|3801705|5802097|6801912|2802103"
+    
+    mintime=input_time[0].strftime('%Y-%m-%d'+'T'+'%H:%M:%S')  # change time format to match ERDAP
+    maxtime=input_time[1].strftime('%Y-%m-%d'+'T'+'%H:%M:%S')
+
+    minlat=min(latlon[0:2])
+    maxlat=max(latlon[0:2]) 
+    minlon=min(latlon[2:4]) 
+    maxlon=max(latlon[2:4]) 
+
+    # construct url to get data
+    baseurl = 'https://erddap.aoml.noaa.gov/gdp/erddap/tabledap/OSMC_RealTime.nc?'
+    #baseurl = 'https://osmc.noaa.gov/erddap/tabledap/OSMC_30day.nc?'
+    if platform_code is None: # NOTE: That we assume that platform codes will always be supplied - I have left this option here for the time being howeve
+        rawquery = ('platform_code,platform_type,time,latitude,longitude,sst,slp,uo,vo&platform_type="DRIFTING BUOYS (GENERIC)"'
+                    +'&time>='+str(mintime)+'&time<='+str(maxtime)
+                    +'&latitude>='+str(minlat)+'&latitude<='+str(maxlat)+'&longitude>='+str(minlon)+'&longitude<='+str(maxlon)
+                    +'&orderBy("platform_code")')
+    else:
+        rawquery = ('platform_code,platform_type,time,latitude,longitude,sst,slp,uo,vo&platform_code=~'
+                    +platform_code
+                    +'&time>='+str(mintime)+'&time<='+str(maxtime)
+                    +'&orderBy("platform_code")')
+
+    # percent encode url and print raw query, encoded query, and access url
+    query = quote(rawquery, encoding='utf-8', safe='&()=')
+    print('raw query: ',rawquery)
+    print('encoded query: ',query)
+    url = baseurl+query
+    print('accessing:' +url)
+
+    ds = xr.open_dataset(url) #Unnamed: 0: ''ID'
+    #ds = ds.rename({'platform_code':'ID','Unnamed: 1':'platform_type',
+    #                                        'UTC':'time','degrees_north':'latitude','degrees_east':'longitude',
+    #                                        'Deg C':'sst','m s-1':'vn','m s-1.1':'ve'})
+    
+    return ds
+
+
+def create_ragged(ds):
+
+    def find_first_indices(arr):
+        ''' Used to find where each trajectory in the data starts'''
+        unique_values, indices = np.unique(arr, return_index=True)
+        return unique_values, indices
+    
+    def find_last_indices(arr):
+        ''' Used to find where each trajectory in the data ends'''
+        unique_values, indices = np.unique(arr[::-1], return_index=True)
+        last_indices = len(arr) - 1 - indices
+        return unique_values, last_indices
+
+    unique_IDs, traj_idx = find_first_indices(ds.ID.values)
+    trajsum = find_last_indices(ds.ID.values)[1]
+
+    records = []
+    for i, traj in enumerate(unique_IDs):
+        # Select traj data
+        
+        lats = ds.latitude[slice(traj_idx[i], trajsum[i])]
+        lons = ds.longitude[slice(traj_idx[i], trajsum[i])]
+        times = ds.time[slice(traj_idx[i], trajsum[i])]
+        ssts = ds.sst[slice(traj_idx[i], trajsum[i])]
+        ve = ds.ve[slice(traj_idx[i], trajsum[i])]
+        vn = ds.vn[slice(traj_idx[i], trajsum[i])]
+        ids = np.full_like(lats, traj)
+        try: hpa = ds.hpa[slice(traj_idx[i], trajsum[i])]
+        except AttributeError: hpa = np.full_like(lats, np.nan)
+
+        len_obs = len(ids)
+
+        record = { 
+            "ID": xr.DataArray([traj], dims={"traj": [1]}),
+            "deploy_lon": xr.DataArray([lons[0]], dims={"traj": [1]}),
+            "deploy_lat": xr.DataArray([lats[0]], dims={"traj": [1]}),
+            "latitude": xr.DataArray([lats], dims={"traj": [1], "obs": np.arange(len_obs)}),
+            "longitude": xr.DataArray([lons], dims={"traj": [1], "obs": np.arange(len_obs)}),
+            "time": xr.DataArray([times], dims={"traj": [1], "obs": np.arange(len_obs)}),
+            "sst": xr.DataArray([ssts], dims={"traj": [1], "obs": np.arange(len_obs)}),
+            "ve": xr.DataArray([ve], dims={"traj": [1], "obs": np.arange(len_obs)}),
+            "vn": xr.DataArray([vn], dims={"traj": [1], "obs": np.arange(len_obs)}),
+            "hpa": xr.DataArray([hpa], dims={"traj": [1], "obs": np.arange(len_obs)}),   
+        }
+        records.append(record)
+
+    new_ds = create_ragged_arr(records).to_xarray()
+    new_ds = get_dt(ds=new_ds)
+    return new_ds
+
 
 def get_rowsize(ds: any = None, array: any = None) -> np.array:
     ''' Function to calculate the 'rowsize' variable in a dataset such as the GDPv2.0 file.
@@ -133,14 +235,214 @@ def get_dt(ds) -> xr.Dataset:
         dt = (ds.time[traj_idx[i]:trajsum[i]].values - ds.time[traj_idx[i]].values).astype('timedelta64[s]').view('int64')
         dt_arr.append(dt)
 
-    #if (len(dt_arr) > 0):
-    #    dt_arr = np.concatenate(dt_arr)
     dt_arr = np.concatenate(dt_arr)
 
     # Set the dt variable in the dataset
     dt = xr.DataArray(dt_arr, coords={'ids': ds.ids}, dims=['obs']) 
 
-    return ds.assign(dt=dt) # For dt using the gap variable, see 'Lukes old drifter codes'
+    return ds.assign(dt=dt)
+
+
+def get_diff_dt(ds, checkgap: np.int64 = None) -> xr.Dataset:
+    ''' Adds the difference of the time delta (dt) to a drifter dataset.
+        Optionally, checks if the gap between observations exceeds a specified
+        amount, cutting the traj by setting the outputs to nan'''
+
+    dts = get_dt(ds=ds).dt.values
+
+    traj_idx, trajsum = get_traj_index(ds=ds)
+
+    if checkgap is not None:
+        records = []
+        for i, traj in enumerate(ds.ID.values):
+            dt_diff = np.diff(dts[slice(traj_idx[i], trajsum[i])], prepend=0)
+            dt = dts[traj_idx[i]:trajsum[i]]
+            lats = ds.latitude[traj_idx[i]:trajsum[i]].values
+            lons = ds.longitude[traj_idx[i]:trajsum[i]].values
+            times = ds.time[traj_idx[i]:trajsum[i]].values
+            ssts = ds.sst[traj_idx[i]:trajsum[i]].values
+            ve = ds.ve[traj_idx[i]:trajsum[i]].values
+            vn = ds.vn[traj_idx[i]:trajsum[i]].values
+            ids = ds.ids[traj_idx[i]:trajsum[i]].values
+
+            break_indices = np.where(dt_diff > checkgap)[0]
+            if len(break_indices) < 1:
+                break_indices = [0,len(ids)]
+            for j, break_idx in enumerate(break_indices):
+                if len(break_indices) < 1:
+                    pass
+                elif j == 0:
+                    start_idx = 0
+                    end_idx = break_idx
+                elif j == len(break_indices):
+                    start_idx = break_indices[j-1] + 1
+                    end_idx = len(ids)
+                else:
+                    start_idx = break_indices[j-1] + 1
+                    end_idx = break_idx
+
+                if start_idx == end_idx:
+                    continue
+
+                len_obs = len(ids[start_idx:end_idx])
+                #print([start_idx, end_idx])
+                record = { 
+                    "ID": xr.DataArray([traj + str((j + 1) / 100)], dims={"traj": [1]}),
+                    "deploy_lon": xr.DataArray([lons[start_idx:end_idx][0]], dims={"traj": [1]}),
+                    "deploy_lat": xr.DataArray([lats[start_idx:end_idx][0]], dims={"traj": [1]}),
+                    "latitude": xr.DataArray([lats[start_idx:end_idx]], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                    "longitude": xr.DataArray([lons[start_idx:end_idx]], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                    "time": xr.DataArray([times[start_idx:end_idx]], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                    "sst": xr.DataArray([ssts[start_idx:end_idx]], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                    "ve": xr.DataArray([ve[start_idx:end_idx]], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                    "vn": xr.DataArray([vn[start_idx:end_idx]], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                    "dt": xr.DataArray([dt[start_idx:end_idx]], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                    "dt_diff": xr.DataArray([dt_diff[start_idx:end_idx]], dims={"traj": [1], "obs": np.arange(len_obs)}),   
+                }
+                records.append(record)
+        return get_dt(create_ragged_arr(records).to_xarray())
+    else:
+        for i in range(len(ds.ID.values)):
+            dt_diff = np.diff(dts[slice(traj_idx[i], trajsum[i])], prepend=0)
+            dt_diffs.append(dt_diff)
+
+        dt_diffs = np.concatenate(dt_diffs)
+
+        new_ds = ds.assign(dt_diff=('obs', dt_diffs))
+        return new_ds
+
+
+def interpolate_hourly(ds, variogram_model='power', threshold = 0.02):
+    """
+    Interpolates latitude and longitude coordinates to hourly resolution
+    
+    Args:
+    ds with variables:
+        sst (np.array): Array of SST values
+        lat (np.array): Array of latitude values
+        lon (np.array): Array of longitude values
+        time (np.array): Array of time values
+        ve & vn (np.arrays): Arrays of velocity values
+    
+    Returns:
+    ragged dataset with interpolated values
+    """
+
+    t_idx, tsum = get_traj_index(ds)
+    hourly_lats = []
+    hourly_lons = []
+    hourly_ssts = []
+    hourly_ves = []
+    hourly_vns = []
+    hourly_times_list = []
+    ids = []
+
+    def krige_coordinate(coords, values, grid_points, variogram_model='power'):
+        # Define variogram model parameters
+        
+        # Create and fit kriging model
+        ok = OrdinaryKriging(
+            coords[:, 0],  # time coordinate
+            coords[:, 1],  # first spatial coordinate
+            values,        # values to interpolate
+            variogram_model=variogram_model,
+            verbose=False,
+            enable_plotting=False,
+        )
+        
+        # Perform kriging
+        z, _ = ok.execute('points', grid_points[:, 0], grid_points[:, 1])
+        
+        return z
+
+    # Modified main loop
+    int_IDs = ds.ID.values.astype(float).astype(int)
+    for i, ID in tqdm(enumerate(int_IDs)):
+        time = ds.time[t_idx[i]:tsum[i]].values
+        lat = ds.latitude[t_idx[i]:tsum[i]].values
+        lon = ds.longitude[t_idx[i]:tsum[i]].values
+        sst = ds.sst[t_idx[i]:tsum[i]].values
+        #print(len(lat), len(lon), len(time))
+        
+        lat_diff = np.abs(np.diff(lat, prepend=lat[0]))
+        lon_diff = np.abs(np.diff(lon, prepend=lon[0]))
+        latna = np.isnan(lat)
+        lonna = np.isnan(lon)
+        latlonan = np.logical_or(latna, lonna)
+        qc_flag = np.logical_or(lat_diff >= threshold, lon_diff >= threshold)
+        qc_flag = np.logical_or(qc_flag, latlonan)
+        
+        # Apply QC flag
+        #print(qc_flag, len(qc_flag))
+        #print(np.sum(qc_flag))
+        #lat[qc_flag] = np.nan
+        #lon[qc_flag] = np.nan
+        #sst[qc_flag] = np.nan
+
+        #Convert `time` to datetime and mask entries with NaNs in lat or lon
+        datetimes = pd.to_datetime(time)
+        #valid_indices = ~np.logical_or(np.isnan(lat), np.isnan(lon))  # Identify valid indices
+        #lat, lon, sst = lat[valid_indices], lon[valid_indices], sst[valid_indices]
+        #datetimes = datetimes[valid_indices]  # Apply mask to datetimes
+
+        #Create an hourly time range and perform interpolation
+        start_time = datetimes.min()
+        end_time = datetimes.max()
+        hourly_times = pd.date_range(start=start_time, end=end_time, freq='H')
+
+        #Convert datetime arrays to float (in hours) for interpolation
+        start_time_num = start_time.timestamp()  # Reference point in seconds
+        original_times_float = (datetimes - start_time).total_seconds().astype(float) / 3600  # Convert to hours
+        hourly_times_float = (hourly_times - start_time).total_seconds().astype(float) / 3600
+        
+        # Create grid points for new timestamps
+        grid_points = np.column_stack([hourly_times_float, np.zeros_like(hourly_times_float)])
+
+        #print(lat, len(lat))
+        #print(lon, len(lon))
+        #print(original_times_float, len(original_times_float))
+        #print(hourly_times_float, len(hourly_times_float))
+        
+        # Prepare spatial-temporal coordinates and values for kriging
+        coords = np.column_stack([
+            original_times_float,
+            lat,
+            lon
+        ])
+
+        # Interpolate latitude and longitude
+        hourly_lat = krige_coordinate(coords[:, [0, 1]], lat, grid_points, variogram_model=variogram_model)
+        hourly_lon = krige_coordinate(coords[:, [0, 2]], lon, grid_points, variogram_model=variogram_model)
+
+        # Append results
+        ids.append(np.full(len(hourly_times), ID))
+        hourly_times_list.append(hourly_times)
+        hourly_lats.append(hourly_lat)
+        hourly_lons.append(hourly_lon)
+        #hourly_ssts.append(hourly_sst)
+        #hourly_ves.append(hourly_ve)
+        #hourly_vns.append(hourly_vn)
+
+    # Concatenate results
+    ids = np.concatenate(ids)
+    hourly_times_list = np.concatenate(hourly_times_list)
+    hourly_lats = np.concatenate(hourly_lats)
+    hourly_lons = np.concatenate(hourly_lons)
+    #hourly_ssts = np.concatenate(hourly_ssts)
+    #hourly_ves = np.concatenate(hourly_ves)
+    #hourly_vns = np.concatenate(hourly_vns)
+    hourly_ssts = np.full(len(hourly_lons), np.nan)
+    hourly_ves = np.full(len(hourly_lons), np.nan)
+    hourly_vns = np.full(len(hourly_lons), np.nan)
+
+    # Create xarray Dataset
+    var_names = ['ID', 'time', 'latitude', 'longitude', 'sst', 've', 'vn']
+    data_arrays = [ids, hourly_times_list, hourly_lats, hourly_lons, hourly_ssts, hourly_ves, hourly_vns]
+    data_dict = {name: (['x'], arr) for name, arr in zip(var_names, data_arrays)}
+    coords = {'x': np.arange(len(data_arrays[0]))}
+    temp_ds = xr.Dataset(data_vars=data_dict, coords=coords)
+
+    return create_ragged(temp_ds)
 
 
 def get_velocities(ds, tinf = 200.0, primes: bool = True):
@@ -185,8 +487,8 @@ def find_index(arr, threshold, x):
     Find the index of the first occurrence of a target value in an array, given a threshold.
 
     Args:
-        arr (numpy.ndarray): The input array (usually delta time vlaues)
-        threshold (int or float): The threshold value.
+        arr (numpy.ndarray): The input array (usually delta time values)
+        threshold (int or float): Used to set the search distance from x.
         x (int or float): The target value.
 
     Returns:
@@ -272,6 +574,7 @@ def traj_cmap(traj, random_seed: int = 42) -> tuple[colors.ListedColormap, color
     Args:
         traj: array of trajectory IDs
         random_seed: integer seed for consistent color generation
+        monotone: A string of a single color to use as a colourmap
 
     Returns:
         A tuple containing a ListedColormap and a BoundaryNorm object
@@ -284,15 +587,14 @@ def traj_cmap(traj, random_seed: int = 42) -> tuple[colors.ListedColormap, color
     # Generate a consistent set of colors based on trajectory IDs
     np.random.seed(random_seed) # Seed number is what makes it consistent
     random_colors = np.random.rand(num_unique_trajectories, 3)
-        
     # Create a colormap using the consistent colors
     cmap = colors.ListedColormap(random_colors) # Create a colormap object
     norm = colors.BoundaryNorm(range(len(traj) + 1), cmap.N) # Create a BoundaryNorm object
-    
+  
     return cmap, norm # Return the colormap and normalizer object
 
 
-def get_traj_cols(ds: any = None, df: any = None) -> xr.Dataset:
+def get_traj_cols(ds: any = None, df: any = None, monotone: str = None) -> xr.Dataset:
     ''' Short function used to set a colour ID (from 0 to length of traj dimension) for each
         unique record (trajectory) in a given dataset or dataframe for plotting.
         
@@ -303,7 +605,7 @@ def get_traj_cols(ds: any = None, df: any = None) -> xr.Dataset:
     if df is not None:
         # Create a colormap using consistent colors
         trajs = pd.factorize(df['ID_marker'].unique())[0] # List of unique trajectory #s from 1,...,n
-        cmap, _ = traj_cmap(trajs)
+        cmap, _ = traj_cmap(trajs, monotone=monotone)
 
         # Create an array of trajectory ids based on 'rowsize'
         traj = pd.factorize(df['ID_marker'].values)[0] # Trajectory numbers for entire df 1,1,1,...,n,n,n
@@ -748,7 +1050,8 @@ def driftplot(ds, ids: bool = True, sst: bool = False, velocity: bool = False,
               borders: bool = True, domain: list = None, pinfo: bool = False,
               traj_cmap: any = None, traj_norm: any = None, set_dpi: int = 150,
               veast: bool = False, vnorth: bool = False, A2: bool = False,
-              x2: bool = False, y2: bool = False) -> plt.figure:
+              x2: bool = False, y2: bool = False, projection = ccrs.PlateCarree(),
+              subdomain: np.array = None) -> plt.figure:
     '''plots SVP drifter trajectories and particular attributes
     
     Args:
@@ -773,10 +1076,17 @@ def driftplot(ds, ids: bool = True, sst: bool = False, velocity: bool = False,
 
     # Create figure 
     fig = plt.figure(figsize=(6,6), dpi=set_dpi)
-    ax = fig.add_subplot(1,1,1,projection=ccrs.PlateCarree())
+    ax = fig.add_subplot(1,1,1,projection=projection)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='3%', pad=0.02, axes_class=plt.Axes)
     
+    # Plot a box around the subdomain if it is given
+    if subdomain is not None:
+        ax.plot(subdomain[0], subdomain[1],
+                c='black', transform=ccrs.PlateCarree(), lw=1.2, linestyle='-', zorder = 9)
+        ax.plot(subdomain[2], subdomain[3],
+                c='black', transform=ccrs.PlateCarree(), lw=1.2, linestyle='-', zorder = 9)
+
     # Plot either sst, time since deployment or velocity   
     # Plot time since deployment
     if time:
@@ -837,7 +1147,7 @@ def driftplot(ds, ids: bool = True, sst: bool = False, velocity: bool = False,
     # Plot sst at each point
     elif sst:
         pcm = ax.scatter(ds.longitude, ds.latitude,
-                         marker='.', s=0.5, c=ds.sst-273.15,
+                         marker='.', s=0.5, c=ds.sst,
                          transform=ccrs.PlateCarree(), cmap=cmocean.cm.thermal,
                          vmin=-2, vmax=35)
         cb = fig.colorbar(pcm, cax=cax)
@@ -865,12 +1175,12 @@ def driftplot(ds, ids: bool = True, sst: bool = False, velocity: bool = False,
     # Add starting points to drifter trajs
     if startpt:
         ax.scatter(ds.deploy_lon, ds.deploy_lat,
-                   s=0.5, marker="$\u25EF$", c='black'
+                   s=15, marker="$\u25EF$", c='black', linewidths=0.5
                    )
 
    # Add land and coastlines to plot 
     if borders:
-        ax.add_feature(cfeature.LAND, facecolor='bisque', zorder=1)
+        ax.add_feature(cfeature.LAND, facecolor='silver', zorder=1)
         ax.add_feature(cfeature.COASTLINE, linewidth=0.25, zorder=1)
 
     # Set the displayed region
@@ -1034,7 +1344,7 @@ def ibm_plot(ds, borders: bool = True, labs: bool = False, startpt: bool = True,
 def drift_frames(ds: any = None, IBM: any = None, IBM_2: any = None, domain: any = (145,165,-45,-20),
                  plot_int: int = 1, ts: int = 1, labs: any = ['SVP drifters', 'Simulated drifters'],
                  framedir: str = 'C:/Users/z5493451/OneDrive - UNSW/Documents/Data/Drifters/animations',
-                 duration: int = None, traj_cmap: any = None, traj_norm: any = None):
+                 duration: int = None, traj_cmap: any = None, traj_norm: any = None, set_dpi = 150):
     '''Function to create frames for animations of drifter trajectories. Works for both GDP and IBM datasets.
         If both a real (i.e., GDP) and IBM dataset are provided, both will be plotted. If multiple IBM datasets
         are provided, they will both be plotted. 
@@ -1043,7 +1353,7 @@ def drift_frames(ds: any = None, IBM: any = None, IBM_2: any = None, domain: any
             framedir: path and name of animation file to save to
             plot_int: interval in hours to plot positions
             labs: the labels used for each trajectory type
-            plot_int: resolution of the animation (at what interval should frames be saved)
+            plot_int (hours): resolution of the animation (at what interval should frames be saved)
             ts: timestep (in hours) of the dataset (should usually be kept at 1 hour for GDP animations)
             duration: duration of the animation (in days)'''
 
@@ -1113,10 +1423,10 @@ def drift_frames(ds: any = None, IBM: any = None, IBM_2: any = None, domain: any
             trajectory_identifiers_b = trajectory_identifiers_c 
 
     # Set up the figure
-    fig = plt.figure(figsize=(12, 8))
+    fig = plt.figure(figsize=(6,6), dpi=set_dpi)
     ax = plt.axes(projection=ccrs.PlateCarree())
     divider = make_axes_locatable(ax)
-    cax = divider.append_axes('right', size='3%', pad=0.02, axes_class=plt.Axes)
+    #cax = divider.append_axes('right', size='3%', pad=0.02, axes_class=plt.Axes)
     ax.set_extent(domain)
     ax.add_feature(cfeature.LAND, edgecolor='black', facecolor='lightgray')
     ax.set_xlabel('Longitude')
@@ -1135,7 +1445,7 @@ def drift_frames(ds: any = None, IBM: any = None, IBM_2: any = None, domain: any
     #for i in range(max(len(traj_data["lat_lon_pairs"]) for traj_data in trajectories + trajectories_b)):
         ax.clear()
         ax.set_extent(domain)
-        ax.add_feature(cfeature.LAND, edgecolor='black', facecolor='gray')
+        ax.add_feature(cfeature.LAND, edgecolor='black', facecolor='silver')
         
         for traj_data in trajectories:
             lat_lon_pairs = traj_data["lat_lon_pairs"][:i+1]
@@ -1153,10 +1463,10 @@ def drift_frames(ds: any = None, IBM: any = None, IBM_2: any = None, domain: any
             # Plot current position as shaped scatter point
             if ds is not None:
                 ax.scatter(current_lat_lon[1], current_lat_lon[0], marker='o', zorder=2.7,
-                           color=traj_data["color"][1], s=50, transform=ccrs.PlateCarree())
+                           color=traj_data["color"][1], s=15, transform=ccrs.PlateCarree())
             else:
                 ax.scatter(current_lat_lon[1], current_lat_lon[0], marker='o', zorder=2.6,
-                           color=traj_data["color"], s=50, transform=ccrs.PlateCarree())
+                           color=traj_data["color"], s=15, transform=ccrs.PlateCarree())
 
         if IBM is not None:
             for traj_data in trajectories_b:
@@ -1169,7 +1479,7 @@ def drift_frames(ds: any = None, IBM: any = None, IBM_2: any = None, domain: any
                             color=traj_data["color"], linestyle='dotted', alpha=0.8, transform=ccrs.PlateCarree())
                 
                 # Plot current position as diamond-shaped scatter point
-                ax.scatter(current_lat_lon[1], current_lat_lon[0], marker='D', color=traj_data["color"], s=45, transform=ccrs.PlateCarree())
+                ax.scatter(current_lat_lon[1], current_lat_lon[0], marker='D', color=traj_data["color"], s=15, transform=ccrs.PlateCarree())
 
         if IBM_2 is not None:
             for traj_data in trajectories_c:
@@ -1202,29 +1512,29 @@ def drift_frames(ds: any = None, IBM: any = None, IBM_2: any = None, domain: any
         ax.set_yticks(np.arange(domain[2], domain[3], 5))
 
         # Create discrete color map for color bar if not supplied
-        if (ds is not None) and (traj_cmap is None):
-            traj_cmap, traj_norm = traj_cmap(traj=ds.traj)
-        elif (ds is None) and (traj_cmap is None):
-            traj_cmap = plt.cm.get_cmap("tab10", len(trajectory_identifiers))
-            traj_norm = colors.BoundaryNorm(range(len(trajectory_identifiers) + 1), traj_cmap.N)
+        #if (ds is not None) and (traj_cmap is None):
+        #    traj_cmap, traj_norm = traj_cmap(traj=ds.ID.values)
+        #elif (ds is None) and (traj_cmap is None):
+        #    traj_cmap = plt.cm.get_cmap("tab10", len(trajectory_identifiers))
+        #    traj_norm = colors.BoundaryNorm(range(len(trajectory_identifiers) + 1), traj_cmap.N)
         
         # Create color bar using the list of identifiers
-        if i == 0:
-            cbar = plt.colorbar(mappable=plt.cm.ScalarMappable(cmap=traj_cmap, norm=traj_norm), cax=cax,
-                                orientation="vertical", ticks=np.arange(len(trajectory_identifiers)) + 0.5)
-            cbar.set_label("ID")
-        
-            cbar.ax.set_yticklabels(trajectory_identifiers)  # Set tick labels to IDs       
+        #if i == 0:
+        #    cbar = plt.colorbar(mappable=plt.cm.ScalarMappable(cmap=traj_cmap, norm=traj_norm), cax=cax,
+        #                        orientation="vertical", ticks=np.arange(len(trajectory_identifiers)) + 0.5)
+        #    cbar.set_label("ID")
+        #
+        #    cbar.ax.set_yticklabels(trajectory_identifiers)  # Set tick labels to IDs       
 
         # Create a legend
-        handles = [
-            plt.Line2D([], [], color='black', marker='o', linestyle='-', markersize=8),
-            plt.Line2D([], [], color='black', marker='D', linestyle='--', markersize=8),
-            plt.Line2D([], [], color='black', marker='^', linestyle='-.', markersize=8)
-        ]
-        legend = ax.legend(handles=handles, labels=labs, loc='center left', bbox_to_anchor=(0.0, 0.65),
-                            frameon=False, fontsize=10, handlelength=2)
-        ax.add_artist(legend)  # Add legend to the plot 
+        #handles = [
+        #    plt.Line2D([], [], color='black', marker='o', linestyle='-', markersize=8),
+        #    plt.Line2D([], [], color='black', marker='D', linestyle='--', markersize=8),
+        #    plt.Line2D([], [], color='black', marker='^', linestyle='-.', markersize=8)
+        #]
+        #legend = ax.legend(handles=handles, labels=labs, loc='center left', bbox_to_anchor=(0.0, 0.65),
+        #                    frameon=False, fontsize=10, handlelength=2)
+        #ax.add_artist(legend)  # Add legend to the plot 
 
         plt.savefig(f"{framedir}/frame_{i:05d}.png")
         print(f"Saved frame {i}")
@@ -1286,10 +1596,11 @@ def grid_plot(ds, domain = [145,165,-45,-20], n = 0.25, threshold = [30, 3000000
     ax.tick_params(axis='both', which='major', labelsize=9)
 
     # Add in bounding boxes of subregions
-    ax.plot(subregions[0], subregions[1],
-        c='black', transform=ccrs.PlateCarree(), lw=1.2, linestyle='-', zorder = 0.75)
-    ax.plot(subregions[2], subregions[3],
-        c='black', transform=ccrs.PlateCarree(), lw=1.2, linestyle='-', zorder = 0.75)
+    if subregions is not None:
+        ax.plot(subregions[0], subregions[1],
+            c='black', transform=ccrs.PlateCarree(), lw=1.2, linestyle='-', zorder = 0.75)
+        ax.plot(subregions[2], subregions[3],
+            c='black', transform=ccrs.PlateCarree(), lw=1.2, linestyle='-', zorder = 0.75)
     
     # Format coloUr bar
     cbar = plt.colorbar(ax.collections[0], ax=ax, label='Number of observations')
@@ -1372,7 +1683,7 @@ def grid_data(points, u: any = None, v: any = None, total: any = None,
 
 def plot_meshgrid_on_map(df, grid_var, domain = [145,165,-45,-20], sigma=1.5,
                          cb_range: any = [1000, 80000], unit_conv = 1000,
-                         var_label = r'Diffusivity ($m^2 s^{-1}$)'):
+                         var_label = r'Diffusivity ($m^2 s^{-1}$)', bathy: any = None):
 
     # Extract data from the DataFrame
     lon = df['lon'].values.reshape(len(np.unique(df['lat'])), -1)
@@ -1420,6 +1731,12 @@ def plot_meshgrid_on_map(df, grid_var, domain = [145,165,-45,-20], sigma=1.5,
     ax.coastlines(linewidth=0.8, zorder=2.5)
     ax.add_feature(cfeature.LAND, edgecolor='black', color='gainsboro', zorder=2)
 
+    # Add bathymetry
+    if bathy is not None:
+        ax.contour(bathy.lon.values, bathy.lat.values, bathy.height.values,
+                levels = [-200], linewidths=1,
+                colors = 'white', linestyles='solid', zorder=1.9)
+    
     # Add gridlines
     ax.gridlines(linewidth=0.5, linestyle='--', x_inline=False, y_inline=False)
 
@@ -2488,9 +2805,14 @@ def rel_disp(ds) -> pd.DataFrame:
 
         # Calculate distances using matrix operations
         for i in range(len(aligned_times1)):
-            dist = distance.distance(d1[i], d2[i]).km
-            zonal_i = distance.distance(d1[i],(d2[i][0],d1[i][1])).km
-            meridional_i = distance.distance(d1[i],(d1[i][0],d2[i][1])).km
+            try:
+                dist = distance.distance(d1[i], d2[i]).km
+                zonal_i = distance.distance(d1[i],(d2[i][0],d1[i][1])).km
+                meridional_i = distance.distance(d1[i],(d1[i][0],d2[i][1])).km
+            except:
+                dist = np.nan
+                zonal_i = np.nan
+                meridional_i = np.nan
             #distances[i] = dist
             #dist_zonal[i] = zonal_i
             #dist_meridional[i] = meridional_i
@@ -2549,6 +2871,20 @@ def rel_disp(ds) -> pd.DataFrame:
         separations = pd.concat([separations, separation], ignore_index=True)
 
     return separations
+
+
+def delta_filter(df, max_delta=3100, min_delta=0):
+    # Apply the filter to the dataframe
+    filtered_df = df.groupby('ID_marker').filter(
+        lambda group: (group['sep_distance'].iloc[0] >= min_delta) and
+                      (group['sep_distance'].iloc[0] <= max_delta)
+    )
+
+    # Print the number of pairs in the filtered dataframe
+    num_unique_ids = filtered_df['ID_marker'].nunique()
+    print(f"Number of pairs in the filtered DataFrame: {num_unique_ids}")
+
+    return filtered_df
 
 
 def find_breakpoints(ds, relative: bool = False, guess: any = None, num_breakpoints: int = 2):
@@ -2696,11 +3032,13 @@ def fit_trends(x: any = None, y: any = None, plot: bool = True,
     if plot and is_powerlaw:
         # Plot observed and fitted values
         plt.scatter(log_x_vals, log_y_vals, label='Observed', s=0.5)
-        plt.plot(log_x_vals, log_y_fit, color='red', label='Fitted')
+        plt.scatter(log_x_vals, y_fit, color='red', label='Fitted')
         # Add labels and legend
         plt.xlabel('X Values')
         plt.ylabel('Y Values')
         plt.legend()
+        #plt.xscale('log')
+        #plt.yscale('log')
         # Annotate the slope on the plot
         slope_annotation = f'Power: {m:.2f}'
         plt.annotate(slope_annotation, xy=(0.1, 0.8), xycoords='axes fraction', fontsize=12)
@@ -3010,7 +3348,7 @@ def compute_fsle(df, threshold_rate=1.2, initial_distance=0.01):
             except ValueError:
                 return False
 
-        separations['dt'] = separations['dt'] / 3600 / 24
+        #separations['dt'] = separations['dt'] / 3600 / 24
         # Filter out rows where 'time_first' or 'time_second' do not include time information
         df = separations[separations['time_first'].apply(has_time_info) & separations['time_second'].apply(has_time_info)]
 
@@ -3035,10 +3373,13 @@ def compute_fsle(df, threshold_rate=1.2, initial_distance=0.01):
         print(len(separations))
         return filtered_df
 
-    return filter_separations(fsle_df)
+    #return filter_separations(fsle_df)
+    return fsle_df
 
 
-def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'], index=0, alphas=[1.15, 1.2, 1.25, 1.41, 1.75]):
+def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'],
+                         index=0, alphas=[1.15, 1.2, 1.25, 1.41, 1.75], num_breakpoints=3,
+                         guess=None, show_legend=True, conf=True):
     """
     Plot the FSLE and standard deviation at each separation distance for multiple dataframes.
 
@@ -3054,19 +3395,58 @@ def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'], i
         upper_bound = np.percentile(bootstrapped_means, 100-(100-ci)/2)
         return lower_bound, upper_bound
 
-    fig = plt.figure(figsize=(6, 6), dpi=125)
-    
+    fig, ax = plt.subplots(1, 1, figsize=(4, 3), dpi=125)
     for i, fsle_df in enumerate(fsle_dfs):
+        print(i)
         # Group by separation distance and calculate nanmean and nanstd
         stats = fsle_df.groupby('separation_distance')['fsle'].agg([np.nanmean]).reset_index()
         stats.rename(columns={'nanmean': 'mean'}, inplace=True)
         stats = stats.sort_values('separation_distance')
-
         # Scatter plot of all FSLE data points
         #plt.scatter(fsle_df['separation_distance'], fsle_df['fsle'], alpha=0.3, label=f'FSLE Data Points ({i})', color=colors[i])
-
-        # Plot mean FSLE as a line
+        
+        # Plot mean FSLE as a line and add regression lines
         if i == index:
+            non_nan_fsle = fsle_df.dropna(subset=['fsle', 'separation_distance'])
+            x_tmp = non_nan_fsle['separation_distance'].values
+            y_tmp = non_nan_fsle['fsle'].values
+            indices = np.logical_and(x_tmp > 0, y_tmp > 0)
+            x = np.log10(x_tmp[indices])
+            y = np.log10(y_tmp[indices])
+
+            # Perform piecewise linear regression
+            if guess is not None:
+                model = PiecewiseLinFit(x, y)
+                breakpoints = model.fit_guess(guess)
+            else:
+                model = PiecewiseLinFit(x, y)
+                breakpoints = model.fit(num_breakpoints)
+
+            # Get the coefficients and intercepts
+            coefficients = model.slopes
+            intercepts = model.intercepts
+
+            # Creating the dictionary for the resulting functions
+            d_funcs = {}
+            for i in range(len(breakpoints) - 1):
+                d_funcs[f'f{i}'] = {
+                    'range': (10 ** breakpoints[i], 10 ** breakpoints[i + 1]),
+                    'power': coefficients[i],
+                    'coef': 10 ** intercepts[i],
+                }
+
+                x_i = x_tmp[np.logical_and(x_tmp >= 10 ** breakpoints[i], x_tmp < 10 ** breakpoints[i + 1])]
+                y_i = y_tmp[np.logical_and(x_tmp >= 10 ** breakpoints[i], x_tmp < 10 ** breakpoints[i + 1])]
+                #print(x_i, y_i)
+                reg_results, fitted_vals = fit_trends(x_i, y_i, plot=False)
+                mid_index = len(fitted_vals[0]) // 2
+                plt.plot(fitted_vals[0], fitted_vals[1],
+                        c='steelblue', lw=1.5)
+                plt.text(fitted_vals[0][mid_index], fitted_vals[1][mid_index], f'm={reg_results["slope"][0]:.2f}',
+                        fontsize=9, ha='center', va='bottom')
+
+
+            print(d_funcs)
 
             # Initialize lists to store the confidence intervals
             lower_cis = []
@@ -3092,31 +3472,32 @@ def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'], i
             stats['upper_ci'] = upper_cis
 
             plt.plot(stats['separation_distance'], stats['mean'],
-                     label=r'$\alpha$'+f' = {alphas[i]}',
+                     label=r'$\alpha$'+f' = {alphas[index]}',
                      color='black',
                      zorder=9)
             plt.scatter(stats['separation_distance'], stats['mean'],
                         color='black',
                         zorder=10,
-                        s=4)
+                        s=3)
 
             # Plot standard deviation as points
             #plt.scatter(stats['separation_distance'], abs(stats['mean'] - stats['std']), color=colors[i])
             #plt.scatter(stats['separation_distance'], stats['mean'] + stats['std'], color=colors[i])
 
             # Plot standard deviation as a shaded area
-            plt.fill_between(stats['separation_distance'],
-                             stats['lower_ci'],
-                             stats['upper_ci'],
-                             color='grey',
-                             alpha=0.3,
-                             zorder=8)
+            if conf:
+                plt.fill_between(stats['separation_distance'],
+                                 stats['lower_ci'],
+                                 stats['upper_ci'],
+                                 color='grey',
+                                 alpha=0.3,
+                                 zorder=8)
         else:
             plt.plot(stats['separation_distance'], stats['mean'],
                      label=r'$\alpha$'+f' = {alphas[i]}',
                      color=colors[i],
                      alpha=0.8,
-                     linewidth=1)
+                     linewidth=2)
             #plt.scatter(stats['separation_distance'], stats['mean'],
             #            color=colors[i],
             #            s=0.5,
@@ -3133,12 +3514,14 @@ def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'], i
             return a * (np.array(time) ** b)
     
     # Plot theoretical trendlines
-    delta_a = np.linspace(0.06, 2, 20)
-    delta_b = np.linspace(2.5, 350, 100)
-    delta_c = np.linspace(400, 1000, 100)
+    delta_a = np.linspace(0.06, 2, 50)
+    #delta_b = np.linspace(2.5, 350, 100)
+    delta_c = np.linspace(20, 200, 200)
+    delta_b = np.linspace(20, 400, 200)
     deltas = [delta_a, delta_b, delta_c]
     #deltas = [delta_b, delta_c]
-    ystarts = [20, 30, 20000]
+    #ystarts = [20, 30, 20000]
+    ystarts = [1, 5, 250]
     t_powers = [0, -2/3, -2]
     #ystarts = [30, 10000]
     #t_powers = [-2/3, -2]
@@ -3146,7 +3529,7 @@ def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'], i
         scale = ystart / (1 ** t_powers[i]) # y-start / 1^pwr law exponent
         theoretical_vals = t_funcs(a=scale, time=deltas[i], b=t_powers[i])
         plt.plot(deltas[i], theoretical_vals,
-                 color='steelblue', linewidth=1)
+                 color='gray', linewidth=1)
         
         # Add text at the end of each line to indicate the power
         labs = ['const', r'$\delta^{\frac{-2}{3}}$', r'$\delta^{-2}$']
@@ -3158,7 +3541,9 @@ def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'], i
     plt.yscale('log')
     plt.xlabel('Separation Distance (Km)', fontsize=10)
     plt.ylabel(r'$\lambda$ (days$^{-1}$)', fontsize=10)
-    plt.legend(fontsize=10)
+    plt.ylim(0.005, 300)
+    if show_legend:
+        plt.legend(fontsize=9)
     plt.show()
 
     return fig

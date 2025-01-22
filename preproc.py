@@ -4,6 +4,46 @@ from datetime import datetime
 import pandas as pd
 from tqdm import tqdm
 
+import xarray as xr
+import numpy as np
+from datetime import datetime
+import pandas as pd
+import awkward as ak
+from tqdm import tqdm
+
+def fill_values(var, default=np.nan):
+    '''
+    Change fill values (-1e+34, inf, -inf) in var array to value specified by default
+    '''
+    missing_value = np.logical_or(np.isclose(var, -1e+34), ~np.isfinite(var))
+    if np.any(missing_value):
+        var[missing_value] = default
+    return var
+
+
+def str_to_float(value, default=np.nan):
+    '''
+    :param value: string
+    :return: bool
+    '''
+    try:
+        fvalue = float(value)
+        if np.isnan(fvalue):
+            return default
+        else:
+            return fvalue
+    except ValueError:
+        return default
+
+def cut_str(value, max_length):
+    '''
+    Cut a string to a specify lenth.
+    :param value: string
+           max_length: lenght of the output
+    :return: string with max_length chars
+    '''
+    return value[:max_length]
+
 class create_ragged_arr:
     def __init__(self, records):
         self.records = records # Records should be given as a list of xr dicts
@@ -76,8 +116,10 @@ class create_ragged_arr:
         self.longitude = np.zeros(nb_obs, dtype='float32')
         self.latitude = np.zeros(nb_obs, dtype='float32')
         self.time = np.zeros(nb_obs, dtype='datetime64[s]')
+        self.dt_diff = np.zeros(nb_obs, dtype='int64')
         self.ve = np.zeros(nb_obs, dtype='float32')
         self.vn = np.zeros(nb_obs, dtype='float32')
+        self.hpa = np.zeros(nb_obs, dtype='float32')
         #self.err_lat = np.zeros(nb_obs, dtype='float32')
         #self.err_lon = np.zeros(nb_obs, dtype='float32')
         #self.err_ve = np.zeros(nb_obs, dtype='float32')
@@ -125,6 +167,8 @@ class create_ragged_arr:
         self.longitude[oid:oid+size] = ds.longitude.data[0]
         self.latitude[oid:oid+size] = ds.latitude.data[0]
         self.time[oid:oid+size] = (ds.time.data[0])
+        try: self.dt_diff[oid:oid+size] = ds.dt_diff.data[0]
+        except: pass
         self.ve[oid:oid+size] = ds.ve.data[0]
         self.vn[oid:oid+size] = ds.vn.data[0]
         #self.err_lat[oid:oid+size] = ds.err_lat.data[0]
@@ -142,6 +186,8 @@ class create_ragged_arr:
         #self.flg_sst1[oid:oid+size] = ds.flg_sst1.data[0]
         #self.flg_sst2[oid:oid+size] = ds.flg_sst2.data[0]
         #self.drogue_status[oid:oid+size] = drogue_presence(self.drogue_lost_date[tid], self.time[oid:oid+size])
+        try: self.hpa[oid:oid+size] = ds.hpa.data[0]
+        except: pass
 
     def to_xarray(self):
         ds = xr.Dataset(
@@ -185,6 +231,7 @@ class create_ragged_arr:
                 #DrogueDetectSensor=(['traj'], self.drogue_detect_sensor, {'long_name': 'Drogue detection sensor', 'units':'-'}),
 
                 # position and velocity
+                dt_diff=(['obs'], self.dt_diff, {'long_name': 'Time interval between previous and next location', 'units':'s'}),
                 ve=(['obs'], self.ve, {'long_name': 'Eastward velocity', 'units':'m/s'}),
                 vn=(['obs'], self.vn, {'long_name': 'Northward velocity', 'units':'m/s'}),
                 #gap=(['obs'], self.gap, {'long_name': 'Time interval between previous and next location', 'units':'s'}),
@@ -196,6 +243,7 @@ class create_ragged_arr:
 
                 # sst
                 sst=(['obs'], self.sst, {'long_name': 'Fitted sea water temperature', 'units':'Kelvin', 'comments': 'Estimated near-surface sea water temperature from drifting buoy measurements. It is the sum of the fitted near-surface non-diurnal sea water temperature and fitted diurnal sea water temperature anomaly. Discrepancies may occur because of rounding.'}),
+                hpa=(['obs'], self.hpa, {'long_name': 'Fitted sea-level air pressure', 'units':'hPa', 'comments': 'Sea-level air pressure from drifting buoy measurements.'}),
                 #sst1=(['obs'], self.sst1, {'long_name': 'Fitted non-diurnal sea water temperature', 'units':'Kelvin', 'comments': 'Estimated near-surface non-diurnal sea water temperature from drifting buoy measurements'}),
                 #sst2=(['obs'], self.sst2, {'long_name': 'Fitted diurnal sea water temperature anomaly', 'units':'Kelvin', 'comments': 'Estimated near-surface diurnal sea water temperature anomaly from drifting buoy measurements'}),
                 #err_sst=(['obs'], self.err_sst, {'long_name': 'Standard uncertainty of fitted sea water temperature', 'units':'Kelvin', 'comments': 'Estimated one standard error of near-surface sea water temperature estimate from drifting buoy measurements'}),

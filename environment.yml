@@ -1,6 +1,7 @@
 name: ldrift
 channels:
   - conda-forge
+  - pip
 dependencies:
   - python =3.11
   - numpy
@@ -14,18 +15,9 @@ dependencies:
   - shapely
   - numba
   - matplotlib
-  - mpl_toolkits
   - cartopy
   - colormaps
   - cmocean
-  - tqdm
   - scipy
-  - sklearn
   - geopy
-  - piecewise_regression
-  - pwlf
-  - itertools
-  - os
-  - pyproj
-  - glob
-  - PIL
+  - clouddrift
