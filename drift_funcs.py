@@ -4,7 +4,12 @@
 ''' This script contains all the functions used to analyse the NOAA GDP dataset and 
     some of the functions to analyse partilce tracking models (IBM; e.g., OpenDrift)
     output (some of the GDP functions are fairly robust and can be run with IBM
-    input regardless)
+    input regardless).
+
+    Most functions are designed to work with ragged arrays using xarray. For the
+    structure of the ragged array, see the default GDPv2.0 file structure. Note also,
+    that the ldrift package also provides some functions for converting other dataset
+    structures into the ragged array form (see 'create_ragged').
  '''
 
 ## =============================================== LIBRARY ============================================== ##
@@ -22,7 +27,8 @@ from scipy.interpolate import griddata
 from scipy.interpolate import interp1d
 from scipy.spatial import cKDTree
 from scipy.ndimage import gaussian_filter
-from pykrige.ok import OrdinaryKriging
+from scipy import linalg
+#from pykrige.ok import OrdinaryKriging
 from pwlf import PiecewiseLinFit
 from sklearn.decomposition import PCA # PCA for generating diffusivity tensors
 from sklearn.impute import SimpleImputer # For dealing with NaNs during PCA
@@ -74,14 +80,14 @@ from ldrift.preproc import create_ragged_arr
 
 ## =================== FUN-CTIONS - so called because they are Fun, not Necessarily "functional" =========== ##
 
-def getdrift_ncdf(platform_code: str = None, input_time = [datetime.datetime(2023,10,1,0,0,0,0),datetime.datetime(2024,2,1,0,0,0,0)],
-                    latlon = [-50, -30, 140, 160]) -> pd.DataFrame:
-    ''' Function to get drifter data from url - return ids latitudes,longitudes,and times in a contiguous ragged array
-        (GDP format). Input_time can either contain two values: start_time & end_time or one value as an interval
+def getdrift_ncdf(platform_code: str = None, latlon = [-45, -20, 145, 165], 
+                  input_time = [datetime.datetime(2023,10,1,0,0,0,0),datetime.datetime(2024,2,1,0,0,0,0)],
+                  baseurl = 'https://erddap.aoml.noaa.gov/gdp/erddap/tabledap/OSMC_RealTime.nc?') -> xr.Dataset:
+    
+    ''' Function to get drifter data from url - return ids latitudes,longitudes,and times in a flat array
+        format. Input_time can either contain two values: start_time & end_time or one value as an interval
         example: input_time=[datetime(2012,1,1,0,0,0,0),datetime(2012,2,1,0,0,0,0)]
     '''
-    
-    # Default IDs: "5501712|5501713|5501714|5501715|5501716|5501717|5501718|5501719|5501720|5501721|6801910|7801732|2802102|5802100|5802099|6801911|3801705|5802097|6801912|2802103"
     
     mintime=input_time[0].strftime('%Y-%m-%d'+'T'+'%H:%M:%S')  # change time format to match ERDAP
     maxtime=input_time[1].strftime('%Y-%m-%d'+'T'+'%H:%M:%S')
@@ -92,18 +98,19 @@ def getdrift_ncdf(platform_code: str = None, input_time = [datetime.datetime(202
     maxlon=max(latlon[2:4]) 
 
     # construct url to get data
-    baseurl = 'https://erddap.aoml.noaa.gov/gdp/erddap/tabledap/OSMC_RealTime.nc?'
     #baseurl = 'https://osmc.noaa.gov/erddap/tabledap/OSMC_30day.nc?'
-    if platform_code is None: # NOTE: That we assume that platform codes will always be supplied - I have left this option here for the time being howeve
-        rawquery = ('platform_code,platform_type,time,latitude,longitude,sst,slp,uo,vo&platform_type="DRIFTING BUOYS (GENERIC)"'
-                    +'&time>='+str(mintime)+'&time<='+str(maxtime)
-                    +'&latitude>='+str(minlat)+'&latitude<='+str(maxlat)+'&longitude>='+str(minlon)+'&longitude<='+str(maxlon)
-                    +'&orderBy("platform_code")')
+    if platform_code is None:
+        rawquery = ('platform_code,platform_type,time,latitude,longitude&platform_type="DRIFTING BUOYS (GENERIC)"'
+                    +'&time>='+str(mintime)+'Z&time<='+str(maxtime)
+                    +'Z&latitude>='+str(minlat)+'&latitude<='+str(maxlat)+'&longitude>='+str(minlon)+'&longitude<='+str(maxlon)
+                    #+'&orderBy("platform_code")')
+        )
     else:
-        rawquery = ('platform_code,platform_type,time,latitude,longitude,sst,slp,uo,vo&platform_code=~'
+        rawquery = ('platform_code,platform_type,time,latitude,longitude&platform_code=~'
                     +platform_code
-                    +'&time>='+str(mintime)+'&time<='+str(maxtime)
-                    +'&orderBy("platform_code")')
+                    +'&time>='+str(mintime)+'Z&time<='+str(maxtime)+'Z'
+                    #+'Z&orderBy("platform_code")')
+        )
 
     # percent encode url and print raw query, encoded query, and access url
     query = quote(rawquery, encoding='utf-8', safe='&()=')
@@ -112,15 +119,28 @@ def getdrift_ncdf(platform_code: str = None, input_time = [datetime.datetime(202
     url = baseurl+query
     print('accessing:' +url)
 
-    ds = xr.open_dataset(url) #Unnamed: 0: ''ID'
-    #ds = ds.rename({'platform_code':'ID','Unnamed: 1':'platform_type',
-    #                                        'UTC':'time','degrees_north':'latitude','degrees_east':'longitude',
-    #                                        'Deg C':'sst','m s-1':'vn','m s-1.1':'ve'})
+    ds = xr.open_dataset(url)
     
     return ds
 
 
 def create_ragged(ds):
+
+    """
+    Creates a ragged array from a flat dataset by extracting trajectories and their associated data.
+
+    Args:
+        ds: A flat (single dimension) xarray.Dataset containing variables such as latitude, longitude, time, etc.
+            distinguished by a unique ID for each trajectory.
+
+    Returns:
+        A new xarray.Dataset in ragged array format with extracted trajectory information.
+
+    The function identifies the start and end of each trajectory in the dataset and extracts relevant data
+    such as latitude, longitude, time, and other optional variables (sst, hpa, pt_x, pt_y, pt_d, latres, lonres).
+    It handles missing variables by filling with NaNs. The resulting dataset is structured in a 
+    ragged array format suitable for further analysis.
+    """
 
     def find_first_indices(arr):
         ''' Used to find where each trajectory in the data starts'''
@@ -139,32 +159,92 @@ def create_ragged(ds):
     records = []
     for i, traj in enumerate(unique_IDs):
         # Select traj data
-        
-        lats = ds.latitude[slice(traj_idx[i], trajsum[i])]
-        lons = ds.longitude[slice(traj_idx[i], trajsum[i])]
-        times = ds.time[slice(traj_idx[i], trajsum[i])]
-        ssts = ds.sst[slice(traj_idx[i], trajsum[i])]
-        ve = ds.ve[slice(traj_idx[i], trajsum[i])]
-        vn = ds.vn[slice(traj_idx[i], trajsum[i])]
-        ids = np.full_like(lats, traj)
-        try: hpa = ds.hpa[slice(traj_idx[i], trajsum[i])]
-        except AttributeError: hpa = np.full_like(lats, np.nan)
+        if len(ds.latitude[slice(traj_idx[i], trajsum[i])]) == 0:
+            pass
+        else:
+            lats = ds.latitude[slice(traj_idx[i], trajsum[i])]
+            lons = ds.longitude[slice(traj_idx[i], trajsum[i])]
+            times = ds.time[slice(traj_idx[i], trajsum[i])]
+            #ssts = ds.sst[slice(traj_idx[i], trajsum[i])]
+            try: ve = ds.ve[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: ve = np.full_like(lats, np.nan)
+            try: vn = ds.vn[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: vn = np.full_like(lats, np.nan)
+            ids = np.full_like(lats, traj)
+            try: ssts = ds.sst[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: ssts = np.full_like(lats, np.nan)
+            try: hpa = ds.hpa[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: hpa = np.full_like(lats, np.nan)
+            try: pt_x = ds.pt_x[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: pt_x = np.full_like(lats, np.nan)
+            try: pt_y = ds.pt_x[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: pt_y = np.full_like(lats, np.nan)
+            try: pt_d = ds.pt_x[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: pt_d = np.full_like(lats, np.nan)
+            try: latres = ds.latres[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: latres = np.full_like(lats, np.nan)
+            try : lonres = ds.lonres[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: lonres = np.full_like(lats, np.nan)
+            try: u_res = ds.u_res[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: u_res = np.full_like(lats, np.nan)
+            try: v_res = ds.v_res[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: v_res = np.full_like(lats, np.nan) 
+            try: div = ds.div[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: div = np.full_like(lats, np.nan)
+            try: Ro = ds.Ro[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: Ro = np.full_like(lats, np.nan)
+            try: R = ds.R[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: R = np.full_like(lats, np.nan)
+            try: V = ds.V[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: V = np.full_like(lats, np.nan)
+            try: omega = ds.omega[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: omega = np.full_like(lats, np.nan)
+            try: kappa = ds.kappa[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: kappa = np.full_like(lats, np.nan)
+            try: lambda_val = ds.lambda_val[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: lambda_val = np.full_like(lats, np.nan)
+            try: theta = ds.theta[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: theta = np.full_like(lats, np.nan)
+            try: phi = ds.phi[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: phi = np.full_like(lats, np.nan)
+            try: psi = ds.psi[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: psi = np.full_like(lats, np.nan)
+            try: zo = ds.zo[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: zo = np.full_like(lats, np.nan)
 
-        len_obs = len(ids)
+            len_obs = len(ids)
 
-        record = { 
-            "ID": xr.DataArray([traj], dims={"traj": [1]}),
-            "deploy_lon": xr.DataArray([lons[0]], dims={"traj": [1]}),
-            "deploy_lat": xr.DataArray([lats[0]], dims={"traj": [1]}),
-            "latitude": xr.DataArray([lats], dims={"traj": [1], "obs": np.arange(len_obs)}),
-            "longitude": xr.DataArray([lons], dims={"traj": [1], "obs": np.arange(len_obs)}),
-            "time": xr.DataArray([times], dims={"traj": [1], "obs": np.arange(len_obs)}),
-            "sst": xr.DataArray([ssts], dims={"traj": [1], "obs": np.arange(len_obs)}),
-            "ve": xr.DataArray([ve], dims={"traj": [1], "obs": np.arange(len_obs)}),
-            "vn": xr.DataArray([vn], dims={"traj": [1], "obs": np.arange(len_obs)}),
-            "hpa": xr.DataArray([hpa], dims={"traj": [1], "obs": np.arange(len_obs)}),   
-        }
-        records.append(record)
+            record = { 
+                "ID": xr.DataArray([traj], dims={"traj": [1]}),
+                "deploy_lon": xr.DataArray([lons[0]], dims={"traj": [1]}),
+                "deploy_lat": xr.DataArray([lats[0]], dims={"traj": [1]}),
+                "latitude": xr.DataArray([lats], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "longitude": xr.DataArray([lons], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "time": xr.DataArray([times], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "sst": xr.DataArray([ssts], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "ve": xr.DataArray([ve], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "vn": xr.DataArray([vn], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "hpa": xr.DataArray([hpa], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "pt_x": xr.DataArray([pt_x], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "pt_y": xr.DataArray([pt_y], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "pt_d": xr.DataArray([pt_d], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "latres": xr.DataArray([latres], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "lonres": xr.DataArray([lonres], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "u_res": xr.DataArray([u_res], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "v_res": xr.DataArray([v_res], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "div": xr.DataArray([div], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "Ro": xr.DataArray([Ro], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "R": xr.DataArray([R], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "V": xr.DataArray([V], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "omega": xr.DataArray([omega], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "kappa": xr.DataArray([kappa], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "lambda_val": xr.DataArray([lambda_val], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "theta": xr.DataArray([theta], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "phi": xr.DataArray([phi], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "psi": xr.DataArray([psi], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "zo": xr.DataArray([zo], dims={"traj": [1], "obs": np.arange(len_obs)}),   
+            }
+            records.append(record)
 
     new_ds = create_ragged_arr(records).to_xarray()
     new_ds = get_dt(ds=new_ds)
@@ -246,7 +326,7 @@ def get_dt(ds) -> xr.Dataset:
 def get_diff_dt(ds, checkgap: np.int64 = None) -> xr.Dataset:
     ''' Adds the difference of the time delta (dt) to a drifter dataset.
         Optionally, checks if the gap between observations exceeds a specified
-        amount, cutting the traj by setting the outputs to nan'''
+        amount, in turn, cutting the traj'''
 
     dts = get_dt(ds=ds).dt.values
 
@@ -265,12 +345,16 @@ def get_diff_dt(ds, checkgap: np.int64 = None) -> xr.Dataset:
             vn = ds.vn[traj_idx[i]:trajsum[i]].values
             ids = ds.ids[traj_idx[i]:trajsum[i]].values
 
-            break_indices = np.where(dt_diff > checkgap)[0]
+            break_indices = np.where(dt_diff >= checkgap)[0]
             if len(break_indices) < 1:
                 break_indices = [0,len(ids)]
+                breaks = False
+            elif len(break_indices) >= 1:
+                breaks = True
             for j, break_idx in enumerate(break_indices):
-                if len(break_indices) < 1:
-                    pass
+                if breaks is False:
+                    start_idx = break_indices[0]
+                    end_idx = break_indices[1]
                 elif j == 0:
                     start_idx = 0
                     end_idx = break_idx
@@ -281,7 +365,7 @@ def get_diff_dt(ds, checkgap: np.int64 = None) -> xr.Dataset:
                     start_idx = break_indices[j-1] + 1
                     end_idx = break_idx
 
-                if start_idx == end_idx:
+                if (start_idx == end_idx) or (breaks is False):
                     continue
 
                 len_obs = len(ids[start_idx:end_idx])
@@ -312,143 +396,209 @@ def get_diff_dt(ds, checkgap: np.int64 = None) -> xr.Dataset:
         return new_ds
 
 
-def interpolate_hourly(ds, variogram_model='power', threshold = 0.02):
+def loess_smoothing_with_time(lat_values, lon_values, time_values, window_size=8, degree=2, 
+                             target_resolution='1H'):
     """
-    Interpolates latitude and longitude coordinates to hourly resolution
+    Apply LOESS smoothing to geographic coordinates and interpolate to a regular time resolution.
     
-    Args:
-    ds with variables:
-        sst (np.array): Array of SST values
-        lat (np.array): Array of latitude values
-        lon (np.array): Array of longitude values
-        time (np.array): Array of time values
-        ve & vn (np.arrays): Arrays of velocity values
+    Parameters:
+    lat_values (array-like): Array of latitude values
+    lon_values (array-like): Array of longitude values
+    time_values (array-like): Array of timestamp values (datetime objects or timestamp strings)
+    window_size (int): Size of the moving window for LOESS (default: 8)
+    degree (int): Degree of the polynomial for LOESS (default: 2)
+    target_resolution (str): Target time resolution for interpolation (default: '1H' for hourly)
     
     Returns:
-    ragged dataset with interpolated values
+    tuple: (regular_times, smoothed_lat, smoothed_lon) - Regular time points with smoothed coordinates
     """
 
-    t_idx, tsum = get_traj_index(ds)
-    hourly_lats = []
-    hourly_lons = []
-    hourly_ssts = []
-    hourly_ves = []
-    hourly_vns = []
-    hourly_times_list = []
-    ids = []
+    def _loess_smoothing_core(lat_values, lon_values, window_size=8, degree=2):
+        """
+        Core LOESS smoothing function for geographic coordinates.
+        """
+        n = len(lat_values)
 
-    def krige_coordinate(coords, values, grid_points, variogram_model='power'):
-        # Define variogram model parameters
-        
-        # Create and fit kriging model
-        ok = OrdinaryKriging(
-            coords[:, 0],  # time coordinate
-            coords[:, 1],  # first spatial coordinate
-            values,        # values to interpolate
-            variogram_model=variogram_model,
-            verbose=False,
-            enable_plotting=False,
-        )
-        
-        # Perform kriging
-        z, _ = ok.execute('points', grid_points[:, 0], grid_points[:, 1])
-        
-        return z
+        # Initialize arrays for smoothed values
+        smoothed_lat = np.zeros(n)
+        smoothed_lon = np.zeros(n)
 
-    # Modified main loop
-    int_IDs = ds.ID.values.astype(float).astype(int)
-    for i, ID in tqdm(enumerate(int_IDs)):
-        time = ds.time[t_idx[i]:tsum[i]].values
-        lat = ds.latitude[t_idx[i]:tsum[i]].values
-        lon = ds.longitude[t_idx[i]:tsum[i]].values
-        sst = ds.sst[t_idx[i]:tsum[i]].values
-        #print(len(lat), len(lon), len(time))
-        
-        lat_diff = np.abs(np.diff(lat, prepend=lat[0]))
+        # Create index array (will be used as the independent variable)
+        indices = np.arange(n)
+
+        # For each point, fit a local polynomial using nearby points
+        for i in range(n):
+            # Determine indices for the local window
+            # Calculate distances (in terms of indices) from current point
+            distances = np.abs(indices - i)
+
+            # Get indices of the closest window_size points
+            nearest_indices = np.argsort(distances)[:window_size]
+
+            # Get the x values (indices) and y values (lat/lon) for the window
+            x_local = indices[nearest_indices]
+            lat_local = lat_values[nearest_indices]
+            lon_local = lon_values[nearest_indices]
+
+            # Create the design matrix for polynomial regression
+            X = np.column_stack([x_local**j for j in range(degree+1)])
+
+            # Fit polynomials for latitude and longitude separately
+            try:
+                # Solve the normal equations: (X^T X) b = X^T y
+                beta_lat = linalg.solve(X.T @ X, X.T @ lat_local)
+                beta_lon = linalg.solve(X.T @ X, X.T @ lon_local)
+
+                # Create the design matrix for the current point
+                X_i = np.array([i**j for j in range(degree+1)])
+
+                # Compute the smoothed values
+                smoothed_lat[i] = X_i @ beta_lat
+                smoothed_lon[i] = X_i @ beta_lon
+            except np.linalg.LinAlgError:
+                # In case of singular matrix (when points are too closely packed)
+                # Just use the original value
+                smoothed_lat[i] = lat_values[i]
+                smoothed_lon[i] = lon_values[i]
+
+        return smoothed_lat, smoothed_lon
+
+    # Convert inputs to numpy arrays if they aren't already
+    lat_values = np.array(lat_values)
+    lon_values = np.array(lon_values)
+    
+    # Ensure time_values are datetime objects
+    if not isinstance(time_values[0], datetime.datetime):
+        try:
+            time_values = np.array([pd.to_datetime(t) for t in time_values])
+        except:
+            raise ValueError("Time values must be convertible to datetime objects")
+    
+    # Check that all inputs are the same length
+    if not (len(lat_values) == len(lon_values) == len(time_values)):
+        raise ValueError("Latitude, longitude, and time arrays must have the same length")
+    
+    # Step 1: Apply LOESS smoothing to the position data
+    smoothed_lat, smoothed_lon = _loess_smoothing_core(lat_values, lon_values, window_size, degree)
+    
+    # Step 2: Create a DataFrame with the original time values and smoothed coordinates
+    df = pd.DataFrame({
+        'time': time_values,
+        'lat': smoothed_lat,
+        'lon': smoothed_lon
+    }).set_index('time')
+    
+    # Step 3: Create a regular time series at the target resolution
+    min_time = min(time_values)
+    max_time = max(time_values)
+    regular_times = pd.date_range(start=min_time, end=max_time, freq=target_resolution)
+    
+    # Step 4: Resample and interpolate to the regular time series
+    # First, handle potential duplicate indices by aggregating (taking mean of duplicates)
+    df = df.groupby(level=0).mean()
+    
+    # Create a reindexed DataFrame with the regular time points
+    regular_df = pd.DataFrame(index=regular_times)
+    
+    # Join the original data
+    combined_df = regular_df.join(df)
+    
+    # Interpolate missing values
+    interpolated_df = combined_df.interpolate(method='linear', limit_direction='both')
+    
+    # Extract the results
+    regular_lat = interpolated_df['lat'].values
+    regular_lon = interpolated_df['lon'].values
+    
+    return regular_times, regular_lat, regular_lon
+
+
+def xarr_to_mat(ds, filename='xarr_to_mat_tmp', path='c:/Users/z5493451/OneDrive - UNSW/Documents/Data/Drifters/'):
+    """
+    Converts an xarray dataset of drifter trajectories into MATLAB .mat files.
+
+    This function extracts time, latitude, longitude, sea surface temperature (sst), and
+    sea level air pressure (hpa) from each trajectory in the given dataset. It then converts
+    the time values to MATLAB's datenum format and organizes the data into a structure
+    compatible with MATLAB. The resulting data is saved to .mat files, with separate files 
+    for latitude and longitude data.
+
+    Args:
+        ds: An xarray.Dataset ragged array containing drifter trajectory data, including time, latitude,
+            longitude, and optionally sea surface temperature and air pressure.
+        filename: A string specifying the base name of the output .mat files. Defaults to 'xarr_to_mat_tmp'.
+        path: A string specifying the directory path where the .mat files will be saved. 
+              Defaults to 'c:/Users/z5493451/OneDrive - UNSW/Documents/Data/Drifters/'.
+
+    Raises:
+        AttributeError: If the dataset lacks optional variables like sst or hpa,
+                        they are filled with NaNs.
+
+    Saves:
+        Two .mat files in the specified directory path with the base filename followed by
+        '_x.mat' for longitude data and '_y.mat' for latitude data.
+    """
+
+    import scipy.io
+    traj_idx, trajsum = get_traj_index(ds=ds)
+    x_traj_mat = []
+    y_traj_mat = []
+
+    def matlab_datenum(time_values):
+        # Convert to pandas datetime, if not already
+        times = pd.to_datetime(time_values)
+        # Convert to days since 0000-01-01, which aligns with MATLAB's datenum
+        matlab_datenum_times = times.to_julian_date() - pd.Timestamp('1970-01-01').to_julian_date() + 719529
+        return matlab_datenum_times.tolist()
+
+    for i in range(len(traj_idx)):
+        # Extract time, latitude, and longitude for each trajectory
+        time = ds.time[slice(traj_idx[i], trajsum[i])].values
+        lat = ds.latitude[slice(traj_idx[i], trajsum[i])].values
+        lon = ds.longitude[slice(traj_idx[i], trajsum[i])].values
+        try: hpa = ds.hpa[slice(traj_idx[i], trajsum[i])].values
+        except AttributeError: hpa = np.full_like(lat, np.nan)
+        try: sst = ds.sst[slice(traj_idx[i], trajsum[i])].values
+        except AttributeError: sst = np.full_like(lat, np.nan)
+
+        lat_diff = np.abs(np.diff(lat, prepend=lat[0]))  # Prepend to keep the array size the same
         lon_diff = np.abs(np.diff(lon, prepend=lon[0]))
-        latna = np.isnan(lat)
-        lonna = np.isnan(lon)
-        latlonan = np.logical_or(latna, lonna)
-        qc_flag = np.logical_or(lat_diff >= threshold, lon_diff >= threshold)
-        qc_flag = np.logical_or(qc_flag, latlonan)
+
+        t = matlab_datenum(time)
+        # Create the list structure without extra dimensions
+        x = lon  # lon and matlab_time are lists
+        y = lat  # lat and matlab_time are lists
         
-        # Apply QC flag
-        #print(qc_flag, len(qc_flag))
-        #print(np.sum(qc_flag))
-        #lat[qc_flag] = np.nan
-        #lon[qc_flag] = np.nan
-        #sst[qc_flag] = np.nan
+        # Construct a dictionary with named fields for MATLAB
+        x_dict = {
+            'x': x,   # Longitude data
+            't': t,   # Time 
+            'sst': sst, # Temperature
+            'hpa': hpa # SL Air Pressure
+        }
 
-        #Convert `time` to datetime and mask entries with NaNs in lat or lon
-        datetimes = pd.to_datetime(time)
-        #valid_indices = ~np.logical_or(np.isnan(lat), np.isnan(lon))  # Identify valid indices
-        #lat, lon, sst = lat[valid_indices], lon[valid_indices], sst[valid_indices]
-        #datetimes = datetimes[valid_indices]  # Apply mask to datetimes
+        # Construct a dictionary with named fields for MATLAB
+        y_dict = {
+            'y': y,   # Latitude data
+            't': t   # Time data
+        }
 
-        #Create an hourly time range and perform interpolation
-        start_time = datetimes.min()
-        end_time = datetimes.max()
-        hourly_times = pd.date_range(start=start_time, end=end_time, freq='H')
+        x_traj_mat.append(x_dict)
+        y_traj_mat.append(y_dict)
 
-        #Convert datetime arrays to float (in hours) for interpolation
-        start_time_num = start_time.timestamp()  # Reference point in seconds
-        original_times_float = (datetimes - start_time).total_seconds().astype(float) / 3600  # Convert to hours
-        hourly_times_float = (hourly_times - start_time).total_seconds().astype(float) / 3600
-        
-        # Create grid points for new timestamps
-        grid_points = np.column_stack([hourly_times_float, np.zeros_like(hourly_times_float)])
-
-        #print(lat, len(lat))
-        #print(lon, len(lon))
-        #print(original_times_float, len(original_times_float))
-        #print(hourly_times_float, len(hourly_times_float))
-        
-        # Prepare spatial-temporal coordinates and values for kriging
-        coords = np.column_stack([
-            original_times_float,
-            lat,
-            lon
-        ])
-
-        # Interpolate latitude and longitude
-        hourly_lat = krige_coordinate(coords[:, [0, 1]], lat, grid_points, variogram_model=variogram_model)
-        hourly_lon = krige_coordinate(coords[:, [0, 2]], lon, grid_points, variogram_model=variogram_model)
-
-        # Append results
-        ids.append(np.full(len(hourly_times), ID))
-        hourly_times_list.append(hourly_times)
-        hourly_lats.append(hourly_lat)
-        hourly_lons.append(hourly_lon)
-        #hourly_ssts.append(hourly_sst)
-        #hourly_ves.append(hourly_ve)
-        #hourly_vns.append(hourly_vn)
-
-    # Concatenate results
-    ids = np.concatenate(ids)
-    hourly_times_list = np.concatenate(hourly_times_list)
-    hourly_lats = np.concatenate(hourly_lats)
-    hourly_lons = np.concatenate(hourly_lons)
-    #hourly_ssts = np.concatenate(hourly_ssts)
-    #hourly_ves = np.concatenate(hourly_ves)
-    #hourly_vns = np.concatenate(hourly_vns)
-    hourly_ssts = np.full(len(hourly_lons), np.nan)
-    hourly_ves = np.full(len(hourly_lons), np.nan)
-    hourly_vns = np.full(len(hourly_lons), np.nan)
-
-    # Create xarray Dataset
-    var_names = ['ID', 'time', 'latitude', 'longitude', 'sst', 've', 'vn']
-    data_arrays = [ids, hourly_times_list, hourly_lats, hourly_lons, hourly_ssts, hourly_ves, hourly_vns]
-    data_dict = {name: (['x'], arr) for name, arr in zip(var_names, data_arrays)}
-    coords = {'x': np.arange(len(data_arrays[0]))}
-    temp_ds = xr.Dataset(data_vars=data_dict, coords=coords)
-
-    return create_ragged(temp_ds)
+    # Save to .mat file with only necessary structure
+    scipy.io.savemat(path + filename +'_x.mat', {'x': x_traj_mat})
+    scipy.io.savemat(path + filename + '_y.mat', {'y': y_traj_mat})
+    print('---------------------------------------------------------------')
+    print('Saved %s_x.mat and %s_y.mat to %s', filename, filename, path)
 
 
 def get_velocities(ds, tinf = 200.0, primes: bool = True):
     traj_idx, trajsum = get_traj_index(ds=ds)
 
     velocities = []
+    us = []
+    vs = []
     velocity_devs = []
     u_devs = []
     v_devs = []
@@ -460,6 +610,8 @@ def get_velocities(ds, tinf = 200.0, primes: bool = True):
             devs_u = ds.u_prime[slice(traj_idx[i], trajsum[i])].values
             devs_v = ds.v_prime[slice(traj_idx[i], trajsum[i])].values
         velocities_tot_i = ds.v_total[slice(traj_idx[i], trajsum[i])].values
+        u_i = ds.ve[slice(traj_idx[i], trajsum[i])].values
+        v_i = ds.vn[slice(traj_idx[i], trajsum[i])].values
         traj_dt_i = ds.dt[slice(traj_idx[i], trajsum[i])].values / 3600 / 24
 
         # Cut each traj at tinf or set to na if not found
@@ -468,8 +620,12 @@ def get_velocities(ds, tinf = 200.0, primes: bool = True):
             continue
         else:
             velocities_tot_i = velocities_tot_i[:tinf_idx]
+            u_i = u_i[:tinf_idx]
+            v_i = v_i[:tinf_idx]
             traj_dt_i = traj_dt_i[:tinf_idx]
             velocities.append(velocities_tot_i)
+            us.append(u_i)
+            vs.append(v_i)
             traj_dts.append(traj_dt_i)
             if primes:
                 devs_tot_i = devs_tot_i[:tinf_idx]
@@ -479,7 +635,7 @@ def get_velocities(ds, tinf = 200.0, primes: bool = True):
                 u_devs.append(devs_u)
                 v_devs.append(devs_v)
 
-    return velocities, velocity_devs, u_devs, v_devs, traj_dts
+    return velocities, us, vs, velocity_devs, u_devs, v_devs, traj_dts
 
 
 def find_index(arr, threshold, x):
@@ -764,19 +920,6 @@ def retrieve_region(ds, lon: any = None, lat: any = None, min_time: any = None, 
         print('No valid drifters based on supplied arguments.')
         #print(ds_subset)
     else:
-        ## Store ds wmos in a temp array and use it to find where WMOs don't exist
-        #wmo_blank = ds_subset.WMO.values
-        #zerowmos = np.where(ds_subset.WMO.values == 0) # Another method may be to check for uniqueness of WMOs
-        #                                               # This way repeated WMOs can be replaced too
-        ## Set missing WMOs to drifter IDs
-        #if any(n != 0 for n in zerowmos):  
-        #    generated_wmos = ds_subset.ID.values[zerowmos[0]]
-        #    print('Generated wmos',generated_wmos,len(generated_wmos))
-        #    wmo_blank[zerowmos[0]] = generated_wmos
-
-        #    #Replace WMOs
-        #    ds_subset.WMO.values = wmo_blank
-
         # Reset rowsizes to match new ds
         ds_subset.rowsize.values = get_rowsize(ds=ds_subset)
 
@@ -1156,7 +1299,7 @@ def driftplot(ds, ids: bool = True, sst: bool = False, velocity: bool = False,
     # Otherwise plot by id (default)
     else:
         pcm = ax.scatter(ds.longitude, ds.latitude,
-                         s=0.5, marker='o', color=ds.traj_cols.values,
+                         s=0.1, marker='o', color=ds.traj_cols.values,
                          )
         cbar = plt.colorbar(mappable=plt.cm.ScalarMappable(cmap=traj_cmap, norm=traj_norm),
                             cax=cax, orientation="vertical",
@@ -1165,7 +1308,7 @@ def driftplot(ds, ids: bool = True, sst: bool = False, velocity: bool = False,
             
         cbar.ax.set_yticklabels(np.unique(ds.ID.values)) # Using unique here and above to remove repeated labels
                                                          # in the dataframe if it is supplied
-        cbar.remove()
+        #cbar.remove()
 
     # Add ID labels to scatter if given the option
     if labs:
@@ -1508,8 +1651,8 @@ def drift_frames(ds: any = None, IBM: any = None, IBM_2: any = None, domain: any
         ax.text(0.02, 0.95, time_format, transform=ax.transAxes, fontsize=12, fontweight="bold")
 
         # Show axis ticks
-        ax.set_xticks(np.arange(domain[0], domain[1], 5))
-        ax.set_yticks(np.arange(domain[2], domain[3], 5))
+        ax.set_xticks(np.arange(domain[0], domain[1], 0.5))
+        ax.set_yticks(np.arange(domain[3], domain[2], 0.5))
 
         # Create discrete color map for color bar if not supplied
         #if (ds is not None) and (traj_cmap is None):
@@ -1623,6 +1766,8 @@ def grid_data(points, u: any = None, v: any = None, total: any = None,
               d_x2: any = None, d_y2: any = None, d_A2: any = None,
               total_prime: any = None, u_prime: any = None,
               v_prime: any = None, Davis_diff: any = None,
+              div: any = None, Ro: any = None, R: any = None,
+              V: any = None, omega: any = None,
               res = 0.25, domain: list = [145,165,-45,-20],
               threshold = 30):
     ''' Grids the mean of a selected data variable on a res x res degree grid. OP can be used to plot using 'plot_meshgrid_on_map'.
@@ -1632,7 +1777,7 @@ def grid_data(points, u: any = None, v: any = None, total: any = None,
         grid vars (u, v, total, sst, time, disp, d_x2, d_y2, d_A2, u', v', tot'):arrays of variable data to be gridded
         res: resolution (in degrees) of grid
         domain: vertices defining the total area for the grid to cover
-        threshold: the minimum no. datapoints in a cell - returns nan for that cell if less
+        threshold: the minimum / maximum no. datapoints in a cell - returns nan for that cell if less
         '''
     
     lon = np.arange(domain[0], domain[1], res)
@@ -1640,10 +1785,13 @@ def grid_data(points, u: any = None, v: any = None, total: any = None,
 
     # Create a test df
     arrays = [u, v, total, sst, time, displacement, disp_x, disp_y,
-              d_prime, disp_x_prime, disp_y_prime, d_x2, d_y2, d_A2, total_prime, u_prime, v_prime, Davis_diff]
+              d_prime, disp_x_prime, disp_y_prime, d_x2, d_y2, d_A2,
+              total_prime, u_prime, v_prime, Davis_diff,
+              div, Ro, R, V, omega]
     data = {name: array for name, array in zip(['u', 'v', 'total', 'sst', 'time', 'displacement', 'disp_x', 'disp_y',
                                                 'd_prime', 'disp_x_prime', 'disp_y_prime', 'd_x2', 'd_y2', 'd_A2',
-                                                'total_prime', 'u_prime', 'v_prime', 'Davis_diff'], arrays) if array is not None}
+                                                'total_prime', 'u_prime', 'v_prime', 'Davis_diff', 'div', 'Ro', 'R', 'V', 'omega'],
+                                                arrays) if array is not None}
     test_df = pd.DataFrame(data)
 
     # Use binned_statistic_2d to calculate mean over regular grid
@@ -1681,14 +1829,46 @@ def grid_data(points, u: any = None, v: any = None, total: any = None,
     return op_df
 
 
-def plot_meshgrid_on_map(df, grid_var, domain = [145,165,-45,-20], sigma=1.5,
-                         cb_range: any = [1000, 80000], unit_conv = 1000,
-                         var_label = r'Diffusivity ($m^2 s^{-1}$)', bathy: any = None):
+def plot_meshgrid_on_map(df, grid_var, domain = [145,165,-45,-20], sigma=None,
+                         cb_range: any = [1000, 80000], magnitude: bool = False, unit_conv = 1000,
+                         var_label = r'Diffusivity ($m^2 s^{-1}$)', bathy: any = None,
+                         cmap = 'cividis', cl: any = None) -> plt.figure:
 
     # Extract data from the DataFrame
+    """
+    Plot a meshgrid of a variable gridded using 'grid_data' on a map.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame containing the data to be plotted
+    grid_var : str
+        Name of the variable to be plotted
+    domain : list, optional
+        List of four values defining the extent of the map [min lon, max lon, min lat, max lat]
+    sigma : float, optional
+        Standard deviation for the Gaussian filter
+    cb_range : list, optional
+        List of two values defining the range of the colorbar
+    unit_conv : float, optional
+        Unit conversion factor for the variable to be plotted
+    var_label : str, optional
+        Label for the colorbar
+    bathy : xarray.Dataset, optional
+        Bathymetry data to be used for background contours
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure containing the plot
+    """
+
     lon = df['lon'].values.reshape(len(np.unique(df['lat'])), -1)
     lat = df['lat'].values.reshape(len(np.unique(df['lat'])), -1)
-    mean_value = abs(df[grid_var].values.reshape(len(np.unique(df['lat'])), -1)) * unit_conv
+    if magnitude is True:
+        mean_value = abs(df[grid_var].values.reshape(len(np.unique(df['lat'])), -1)) * unit_conv
+    else:
+        mean_value = df[grid_var].values.reshape(len(np.unique(df['lat'])), -1) * unit_conv
 
     ## Create a meshgrid for interpolation
     xi, yi = np.meshgrid(np.linspace(lon.min(), lon.max(), lon.shape[1]),
@@ -1701,20 +1881,25 @@ def plot_meshgrid_on_map(df, grid_var, domain = [145,165,-45,-20], sigma=1.5,
     mean_value = griddata((lon[mask], lat[mask]), mean_value[mask], (xi, yi), method='linear')
 
     # Apply Gaussian filter to the interpolated mean values
-    mean_value = gaussian_filter(mean_value, sigma=sigma, cval=np.nan)
+    if sigma is not None:
+        mean_value = gaussian_filter(mean_value, sigma=sigma, cval=np.nan)
 
     # Create a map with specified domain
     fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()},figsize=(6,4), dpi=150)
     ax.set_extent([domain[0], domain[1], domain[2], domain[3]])
 
-    # Plot meshgrid
-    pcm = ax.pcolormesh(xi, yi, mean_value, cmap='cividis', shading='auto',
-                        transform=ccrs.PlateCarree(), norm=colors.LogNorm(vmin=cb_range[0], vmax=cb_range[1]))
+    # Plot meshgrid NOTE: use cmap='cividis' for fancy yellow-purple colourmap
+    pcm = ax.pcolormesh(xi, yi, mean_value, cmap=cmap, shading='auto',
+                        transform=ccrs.PlateCarree(),
+                        norm=colors.SymLogNorm(linthresh=0.001, linscale=1.0, vmin=cb_range[0], vmax=cb_range[1]))
 
     # Plot contours
-    #contour_levels = np.logspace(3, 5, 8)
-    #contour_levels = np.arange(10**3, 10**4.8, 9)
-    contour_levels = [1000, 5000, 10000, 15000, 30000, 40000, 50000, 60000, 70000, 80000, 90000, 100000]
+    if cl is not None:
+        contour_levels = cl
+    else:
+        try: contour_levels = np.logspace(np.log10(cb_range[0]), np.log10(cb_range[1]), 5)
+        except: contour_levels = np.arange(cb_range[0], cb_range[1], 5)
+    
     cs = ax.contour(xi, yi, mean_value, levels=contour_levels, colors='k', linewidths=0.5, transform=ccrs.PlateCarree())
 
     # Label every second contour level
@@ -1746,9 +1931,9 @@ def plot_meshgrid_on_map(df, grid_var, domain = [145,165,-45,-20], sigma=1.5,
     cbar.outline.set_linewidth(0.5)
 
     # Customize colorbar ticks to show original values
-    cbar.set_ticks([10**i for i in range(int(np.log10(cb_range[0])), int(np.log10(cb_range[1])) + 1)])
-    cbar.set_ticklabels([f'{10**i}' for i in range(int(np.log10(cb_range[0])), int(np.log10(cb_range[1])) + 1)])
-    cbar.set_label(var_label, fontsize=9)
+    #cbar.set_ticks([10**i for i in range(int(np.log10(cb_range[0])), int(np.log10(cb_range[1])) + 1)])
+    #cbar.set_ticklabels([f'{10**i}' for i in range(int(np.log10(cb_range[0])), int(np.log10(cb_range[1])) + 1)])
+    #cbar.set_label(var_label, fontsize=9)
 
     # Set labels
     ax.set_xticks(np.arange(domain[0],domain[1],5), crs=ccrs.PlateCarree())
@@ -1761,6 +1946,35 @@ def plot_meshgrid_on_map(df, grid_var, domain = [145,165,-45,-20], sigma=1.5,
     #ax.set_ylabel('Latitude')
 
     return fig
+
+
+def extract_wind(lats, lons, times, wind_ds):
+    ''' Extracts wind data from a wind dataset and returns a DataFrame with the data.
+    
+    args:
+        lats: flattened latitude values
+        lons: flattened longitude values
+        times: flattened time values
+        wind_ds: wind dataset containing u and v wind components, time, and position cordinates
+    '''
+    
+    # Create a DataFrame to store the wind data
+    wind_df = pd.DataFrame(columns=['u', 'v', 'time', 'lat', 'lon'])
+    
+    # Extract wind data for each point
+    for i in range(len(lats)):
+        lat = lats[i]
+        lon = lons[i]
+        time = times[i]
+        
+        # Find the nearest grid point to the drifter location
+        u = wind_ds.Uwind.sel(lat=lat, lon=lon, time=time, method='nearest').values
+        v = wind_ds.Vwind.sel(lat=lat, lon=lon, time=time, method='nearest').values
+        
+        # Add the data to the DataFrame
+        wind_df = wind_df.append({'u': u, 'v': v, 'time': time, 'lat': lat, 'lon': lon}, ignore_index=True)
+    
+    return wind_df
 
 
 def cohort_displace(ds, tau = 20, debug : bool = False, sub_mean: bool = True) -> xr.Dataset:
@@ -1795,19 +2009,9 @@ def cohort_displace(ds, tau = 20, debug : bool = False, sub_mean: bool = True) -
             if pt_disp:
                 threshold_sec = threshold * 24 * 3600
                 points_inv = points[::-1]
-                #print('points')
-                #print(points)
-                #print('points_inv')
-                #print(points_inv)
                 dt_inv = dt[::-1]
-                #print('dt')
-                #print(dt)
-                #print('dt_inv')
-                #print(dt_inv)
                 dt_i = dt_inv[i]
                 tau_idx = find_index(dt_inv, threshold_sec, dt_i)
-                #print('tau_idx')
-                #print(tau_idx)
 
                 if (np.isnan(tau_idx)):  # Set pt displacement to nan where tau exceeds length of time series
                     pt_displacement = np.nan # (i.e., first tau days are cut from the time series)
@@ -1861,8 +2065,6 @@ def cohort_displace(ds, tau = 20, debug : bool = False, sub_mean: bool = True) -
         u = ds.ve[slice(traj_idx[i], trajsum[i])].values
         v = ds.vn[slice(traj_idx[i], trajsum[i])].values
         dt = ds.dt[slice(traj_idx[i], trajsum[i])].values
-        dt_diff_i = np.diff(dt)
-        dt_diff_i = np.insert(dt_diff_i, dt[0], 0)
 
         if tau is not None:
             displacement_i, zonal_i, meridional_i, pt_displacement_i, pt_zonal_i, pt_meridional_i = per_chunk_displace(lat,lon,dt,tau,pt_disp=True)
@@ -1885,6 +2087,8 @@ def cohort_displace(ds, tau = 20, debug : bool = False, sub_mean: bool = True) -
             # time series (dispersal_plot fnc) and diffusivity in m / s for mapping. As such, we convert velocities, first
             # to kilometers a second (e.g., closest totals * 1000) and then to km per n second by multiplying by the time
             # difference array
+            dt_diff_i = np.diff(dt)
+            dt_diff_i = np.insert(dt_diff_i, dt[0], 0)
             displacement_i = displacement_i - ((closest_totals) * 1000 / dt_diff_i)
             zonal_i = zonal_i - ((closest_u) * 1000 / dt_diff_i)
             meridional_i = meridional_i - ((closest_v) * 1000 / dt_diff_i)
@@ -1977,12 +2181,18 @@ def cohort_displace(ds, tau = 20, debug : bool = False, sub_mean: bool = True) -
     return new_ds  # Return the new dataset
 
 
-def disp_tensor(ds, res: any = 0.25, domain = [145,165,-45,-20]):
+def disp_tensor(ds, sub_mean: bool = False, res: any = 0.25, domain = [145,165,-45,-20]):
     ''' Takes a drifter dataset that contains observations of displacement values
         and returns a new ds with the mean and deviation of these displacements
         in a specified grid resolution. Then, the deviations are used to construct
         two diffusivity tensors (k and k_star) which are decomposed and averaged to
-        get a robust diffusivity estimate. '''
+        get a robust diffusivity estimate. 
+        
+        Notes:
+        ------
+        - The option to subtract the mean from the displacement values can be turned
+          on using the sub_mean argument. That is, use sub_mean = False to use the
+          original displacement and velocity values.'''
     
     lon_lat_points = np.column_stack((ds.longitude.values, ds.latitude.values))
     total_velocity = np.sqrt(ds.ve.values ** 2 + ds.vn.values ** 2)
@@ -1990,31 +2200,39 @@ def disp_tensor(ds, res: any = 0.25, domain = [145,165,-45,-20]):
                                      disp_x=ds.pt_x.values, disp_y=ds.pt_y.values,
                                      u=ds.ve.values, v=ds.vn.values, total=total_velocity,
                                      res=res, domain=domain)
-    
-    # Find where each lat/lon falls in the gridded data and use the indices to find mean vals
-    gridded_tree = cKDTree(np.column_stack((grid_df['lon'], grid_df['lat']))) #KDTree for the gridded data
-    _, indices = gridded_tree.query(lon_lat_points, k=1) #Find closest pts
-
-    # Find mean vals to use in subtraction process
-    closest_totals = grid_df['total'].iloc[indices].values #Corresponding values for closest pts
-    closest_u = grid_df['u'].iloc[indices].values
-    closest_v = grid_df['v'].iloc[indices].values
-    closest_displacement = grid_df['displacement'].iloc[indices].values
-    closest_disp_x = grid_df['disp_x'].iloc[indices].values
-    closest_disp_y = grid_df['disp_y'].iloc[indices].values
 
     # Store time lags
     traj_idx, trajsum = get_traj_index(ds=ds)
     time_lags = ds.dt.values
     time_lags[traj_idx] = 3600
+    
+    if sub_mean is True:
+        # Find where each lat/lon falls in the gridded data and use the indices to find mean vals
+        gridded_tree = cKDTree(np.column_stack((grid_df['lon'], grid_df['lat']))) #KDTree for the gridded data
+        _, indices = gridded_tree.query(lon_lat_points, k=1) #Find closest pts
 
-    #Subtract means from individual observations to get deviations
-    dev_totals = closest_totals - total_velocity
-    u_deviations = ds.ve.values - closest_u
-    v_deviations = ds.vn.values - closest_v
-    dev_displacement = abs(ds.pt_d.values - closest_displacement)
-    x_deviations = abs(ds.pt_x.values - closest_disp_x)
-    y_deviations = abs(ds.pt_y.values - closest_disp_y)
+        # Find mean vals to use in subtraction process
+        closest_totals = grid_df['total'].iloc[indices].values #Corresponding values for closest pts
+        closest_u = grid_df['u'].iloc[indices].values
+        closest_v = grid_df['v'].iloc[indices].values
+        closest_displacement = grid_df['displacement'].iloc[indices].values
+        closest_disp_x = grid_df['disp_x'].iloc[indices].values
+        closest_disp_y = grid_df['disp_y'].iloc[indices].values
+
+        #Subtract means from individual observations to get deviations
+        dev_totals = closest_totals - total_velocity
+        u_deviations = ds.ve.values - closest_u
+        v_deviations = ds.vn.values - closest_v
+        dev_displacement = abs(ds.pt_d.values - closest_displacement)
+        x_deviations = abs(ds.pt_x.values - closest_disp_x)
+        y_deviations = abs(ds.pt_y.values - closest_disp_y)
+    else:
+        dev_totals = total_velocity
+        u_deviations = ds.ve.values
+        v_deviations = ds.vn.values
+        dev_displacement = ds.pt_d.values
+        x_deviations = ds.pt_x.values
+        y_deviations = ds.pt_y.values
 
     # Perform PCA on deviation arrays to decompose diff tensor 
     ##### DISPERSION TENSOR 'S' ###############
@@ -2073,10 +2291,13 @@ def lagrangian_autocorr(velocities_list, u, v):
     Calculate the Lagrangian autocorrelation for a list of velocity arrays.
     
     Args:
-        velocities_list (list): A list of numpy arrays, where each array represents velocities recorded for a single trajectory.
+        velocities_list (list): A list of numpy arrays, where each array represents
+            the velocities recorded for a single trajectory. Velcoties can be extracted
+            from a drifter dataset using the 'get_velocities' function.
     
     Returns:
-        list of numpy.ndarray: List of Lagrangian autocorrelation values over all trajectories for different time lags.
+        list of numpy.ndarray: List of Lagrangian autocorrelation values over all
+            trajectories for different time lags.
     """
     autocorrs = []
     zonals = []
@@ -2315,7 +2536,7 @@ def PDF_plot(A2, type='norm', n=30) -> plt.figure:
 
 def find_pairs(ds, ddist0: float = 5, dt0: float = 6, start_dists: any = None) -> pd.DataFrame:
     ''' Short module to find drifter pairs based on their initial separation and start times.
-        in the future I will try implement the capability of finding pairs at any time'''
+        '''
     
     # Find drifter pairs based on start posn. and times
     if start_dists is None:
@@ -2331,7 +2552,7 @@ def find_pairs(ds, ddist0: float = 5, dt0: float = 6, start_dists: any = None) -
 
 def find_chance_pairs(ds, dt: int = 6, ddist = [5, 10]) -> pd.DataFrame:
     ''' Function to find the pairs associated with all drifter trajs
-        in a dataset. Takes a separation distance "ddist" (default 10km) and
+        in a dataset. Takes a separation distance "ddist" (default 5-10km) and
         time "dt" (default 6h) and returns the ID's, time and points when drifter pairs
         first meet the buffer criteria. Naturaly, SHOULD also find starting pairs.
         
@@ -2731,7 +2952,8 @@ def cohort_pair_sep(ds, ddist0: float = 5, dt0: float = 6, start_dists: any = No
 def rel_disp(ds) -> pd.DataFrame:
     ''' Calculates the separation distance between all drifter pairs and calculates the
         relative dispersion. NOTE: this function finds ALL pairs in time, so it can be 
-        quite slow if given a large amount of data.
+        quite slow if given a large amount of data. Use 'cohort_pair_sep' for a more 
+        efficient method of calculating relative dispersion.
          '''
     
     def find_active_trajs(ds):
@@ -2987,13 +3209,6 @@ def fit_trends(x: any = None, y: any = None, plot: bool = True,
             plot: if true, will plot the observed values (x and y) and the best fit line
             '''
 
-    # Test to see if the data are distributed in a power-law distribution
-    #fit = Fit(y, xmin=min(y))
-    #is_powerlaw = fit.distribution_compare('power_law', 'exponential',
-    #                                       normalized_ratio=True)[0] > 0
-    #print('Powerlaw test is: ',is_powerlaw)
-    #is_powerlaw = True
-
     # Initializing because valid_x seems to vanish for some reason
     if exp:
         is_powerlaw = False
@@ -3042,10 +3257,8 @@ def fit_trends(x: any = None, y: any = None, plot: bool = True,
         # Annotate the slope on the plot
         slope_annotation = f'Power: {m:.2f}'
         plt.annotate(slope_annotation, xy=(0.1, 0.8), xycoords='axes fraction', fontsize=12)
+
     return results_df, fit_frame
-    #else:
-    #    print('Data does not fit a power-law distribution')
-    #    return None, None
 
 
 def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
@@ -3056,10 +3269,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
                    ci: bool = True, theoretical: bool = False) -> plt.figure:
     ''' Creates plots of absolute (A2) and relative (D2) dispersal.
         Also has the option to plot mean trendlines or to not plot
-        scatter points (i.e., only plot trendlines). The function is
-        also used to conduct a Kolmogorov-Smirnov test on the observed
-        data to compare it with a number of theoretical regimes which
-        can be supplied by the user using the disp_funcs parameter
+        scatter points (i.e., only plot trendlines). 
         NOTE: This function is very messy and needs better implementation for
             dataframe and dataset separation.
         
@@ -3070,7 +3280,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
             df: a dataframe containing drifter pair separations (relative dispersal),
                 if this AND a ds is supplied the function will plot relative dispersal,
                 otherwise it will plot absolute dispersal
-            scatter: set this to false to remove observation scaatter points from the plot
+            scatter: set this to false to remove observation scatter points from the plot
             components: set this to true to plot meridional + zonal trendlines
             total: set this to true to plot the mean trendline
             disp_funcs: controls where theoretical functions (e.g., t^3/4 etc.) are displayed
@@ -3086,8 +3296,6 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
         ds = df.rename(columns={'D2': 'A2', 'Z2': 'disp_x2', 'M2': 'disp_y2', 'ID': 'ID_1', 'ID_marker': 'ID'})
         ds = ds.sort_values('dt')
         df = df.sort_values('dt')
-        #df['dt'] = df['dt'] * 3600 * 24
-        #ds['dt'] = ds['dt'] * 3600 * 24
         print('Dataframe supplied - attempting to plot relative dispersal...')
         # NOTE: that ds is now a dataframe in this case - I have done this to avoid
         #       using lots of conditional statements given that xarray and pandas
@@ -3098,7 +3306,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
         if cmap is None: # Create a coloUr map if required
             cmap, norm = traj_cmap(ds.traj.values)
 
-    fig = plt.figure(figsize=(4,3), dpi=125)
+    fig = plt.figure(figsize=(4,3), dpi=150)
     ax = fig.add_subplot(1,1,1,)
     # Create the scatter plot if the switch is true
     if scatter:
@@ -3160,7 +3368,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
                 ci_upper.append(upper_bound)
 
         mean_A2_values = np.array(mean_A2_values)
-        ax.plot(unique_x_values, mean_A2_values, color='black', linestyle='solid', label='Total', linewidth=1)
+        ax.plot(unique_x_values, mean_A2_values, color='black', linestyle='solid', label='Total', linewidth=1.5)
 
         if ci:
             ci_lower = np.array(ci_lower)
@@ -3180,7 +3388,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
             mean_x2_values.append(mean_x2_value)
         ax.plot(unique_x_values, mean_x2_values,
                 color='black', linestyle='dashed',
-                label='Zonal', linewidth=1, alpha=1)
+                label='Zonal', linewidth=1.5, alpha=1)
 
         # Calculate mean zonal dispersion at each x value
         mean_disp_y2_values = []
@@ -3189,7 +3397,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
             mean_disp_y2_values.append(mean_disp_y2_value)
         ax.plot(unique_x_values, mean_disp_y2_values,
                 color='black', linestyle='dotted',
-                label='Meridional', linewidth=1, alpha=1)
+                label='Meridional', linewidth=1.5, alpha=1)
     
     ### POWER LAW FUNCTION ###
     def t_funcs(time, b, a: any = 1000, exp: bool = False):
@@ -3238,7 +3446,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
                     #print(f"fitted values {fitted_vals[0], fitted_vals[1]} for func {f_type}")
                     ax.plot(fitted_vals[0], fitted_vals[1],
                         label=f'{f_type}: Best fit dt < {disp_funcs[f_type]["range"][1]}: b={reg_results["slope"].values}',
-                        c='steelblue', linestyle='-')
+                        c='steelblue', linestyle='-', linewidth=1.3)
 
                     mid_index = len(fitted_vals[0]) // 2
                     ax.text(fitted_vals[0][mid_index], fitted_vals[1][mid_index] + 1000, f'm={reg_results["slope"][0]:.2f}',
@@ -3251,7 +3459,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
                 theoretical_vals = t_funcs(a=scale, time=t, b=disp_funcs[f_type]['power'])
                 plt.plot(t, theoretical_vals,
                          label=f'{f_type}: Theoretical power={disp_funcs[f_type]["power"]}',
-                         color='darkgrey', linewidth=1)
+                         color='darkgrey', linewidth=1.3)
                 results.append({
                 'f_type': f_type,
                 'range': disp_funcs[f_type]['range']
@@ -3395,7 +3603,7 @@ def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'],
         upper_bound = np.percentile(bootstrapped_means, 100-(100-ci)/2)
         return lower_bound, upper_bound
 
-    fig, ax = plt.subplots(1, 1, figsize=(4, 3), dpi=125)
+    fig, ax = plt.subplots(1, 1, figsize=(4, 3), dpi=150)
     for i, fsle_df in enumerate(fsle_dfs):
         print(i)
         # Group by separation distance and calculate nanmean and nanstd
@@ -3441,7 +3649,7 @@ def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'],
                 reg_results, fitted_vals = fit_trends(x_i, y_i, plot=False)
                 mid_index = len(fitted_vals[0]) // 2
                 plt.plot(fitted_vals[0], fitted_vals[1],
-                        c='steelblue', lw=1.5)
+                        c='steelblue', lw=1)
                 plt.text(fitted_vals[0][mid_index], fitted_vals[1][mid_index], f'm={reg_results["slope"][0]:.2f}',
                         fontsize=9, ha='center', va='bottom')
 
@@ -3475,10 +3683,10 @@ def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'],
                      label=r'$\alpha$'+f' = {alphas[index]}',
                      color='black',
                      zorder=9)
-            plt.scatter(stats['separation_distance'], stats['mean'],
-                        color='black',
-                        zorder=10,
-                        s=3)
+            #plt.scatter(stats['separation_distance'], stats['mean'],
+            #            color='black',
+            #            zorder=10,
+            #            s=3)
 
             # Plot standard deviation as points
             #plt.scatter(stats['separation_distance'], abs(stats['mean'] - stats['std']), color=colors[i])
@@ -3496,8 +3704,8 @@ def plot_fsle_statistics(fsle_dfs, colors=['r', 'g', 'b', 'c', 'm', 'purple'],
             plt.plot(stats['separation_distance'], stats['mean'],
                      label=r'$\alpha$'+f' = {alphas[i]}',
                      color=colors[i],
-                     alpha=0.8,
-                     linewidth=2)
+                     alpha=0.75,
+                     linewidth=1)
             #plt.scatter(stats['separation_distance'], stats['mean'],
             #            color=colors[i],
             #            s=0.5,

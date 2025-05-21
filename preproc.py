@@ -1,8 +1,5 @@
-import xarray as xr
-import numpy as np
-from datetime import datetime
-import pandas as pd
-from tqdm import tqdm
+#-------------------------------------------------------------------------------------------------------------------------#
+''' Code to perform interpolation and convert data into ragged arrays'''
 
 import xarray as xr
 import numpy as np
@@ -75,43 +72,9 @@ class create_ragged_arr:
         '''
         # Metadata -> uncomment as needed
         self.id = np.zeros(nb_traj, dtype='<U20')
-        #self.location_type = np.zeros(nb_traj, dtype='bool') # 0 Argos, 1 GPS
-        #self.wmo = np.zeros(nb_traj, dtype='int32')
-        #self.expno = np.zeros(nb_traj, dtype='int32')
-        #self.deploy_date = np.zeros(nb_traj, dtype='datetime64[s]')
         self.deploy_lat = np.zeros(nb_traj, dtype='float32')
         self.deploy_lon = np.zeros(nb_traj, dtype='float32')
-        #self.end_date = np.zeros(nb_traj, dtype='datetime64[s]')
-        #self.end_lon = np.zeros(nb_traj, dtype='float32')
-        #self.end_lat = np.zeros(nb_traj, dtype='float32')
-        #self.drogue_lost_date = np.zeros(nb_traj, dtype='datetime64[s]')
-        #self.type_death = np.zeros(nb_traj, dtype='int8')
-        #self.type_buoy = np.chararray(nb_traj, itemsize=15)
-        #self.deployment_ship = np.chararray(nb_traj, itemsize=15)
-        #self.deployment_status = np.chararray(nb_traj, itemsize=15)
-        #self.buoy_type_manufacturer = np.chararray(nb_traj, itemsize=15)
-        #self.buoy_type_sensor_array = np.chararray(nb_traj, itemsize=15)
-        #self.current_program = np.zeros(nb_traj, dtype='int32')
-        #self.purchaser_funding = np.chararray(nb_traj, itemsize=15)
-        #self.sensor_upgrade = np.chararray(nb_traj, itemsize=15)
-        #self.transmissions = np.chararray(nb_traj, itemsize=15)
-        #self.deploying_country = np.chararray(nb_traj, itemsize=15)
-        #self.deployment_comments = np.chararray(nb_traj, itemsize=15)
-        #self.manufacture_year = np.zeros(nb_traj, dtype='int16')
-        #self.manufacture_month = np.zeros(nb_traj, dtype='int16')
-        #self.manufacture_sensor_type = np.chararray(nb_traj, itemsize=5)
-        #self.manufacture_voltage = np.zeros(nb_traj, dtype='int16')
-        #self.float_diameter = np.zeros(nb_traj, dtype='float32')
-        #self.subsfc_float_presence = np.zeros(nb_traj, dtype='bool')
-        #self.drogue_type = np.chararray(nb_traj, itemsize=15)
-        #self.drogue_length = np.zeros(nb_traj, dtype='float32')
-        #self.drogue_ballast = np.zeros(nb_traj, dtype='float32')
-        #self.drag_area_above_drogue = np.zeros(nb_traj, dtype='float32')
-        #self.drag_area_drogue = np.zeros(nb_traj, dtype='float32')
-        #self.drag_area_ratio = np.zeros(nb_traj, dtype='float32')
-        #self.drag_center_depth = np.zeros(nb_traj, dtype='float32')
-        #self.drogue_detect_sensor = np.chararray(nb_traj, itemsize=15)
-
+        
         # values defined at every observation (timestep)
         self.longitude = np.zeros(nb_obs, dtype='float32')
         self.latitude = np.zeros(nb_obs, dtype='float32')
@@ -120,23 +83,29 @@ class create_ragged_arr:
         self.ve = np.zeros(nb_obs, dtype='float32')
         self.vn = np.zeros(nb_obs, dtype='float32')
         self.hpa = np.zeros(nb_obs, dtype='float32')
-        #self.err_lat = np.zeros(nb_obs, dtype='float32')
-        #self.err_lon = np.zeros(nb_obs, dtype='float32')
-        #self.err_ve = np.zeros(nb_obs, dtype='float32')
-        #self.err_vn = np.zeros(nb_obs, dtype='float32')
-        #self.gap = np.zeros(nb_obs, dtype='float32')
-        #self.drogue_status = np.zeros(nb_obs, dtype='bool') # 1 drogued, 0 undrogued
-
+        self.pt_d = np.zeros(nb_obs, dtype='float32')
+        self.pt_x = np.zeros(nb_obs, dtype='float32')
+        self.pt_y = np.zeros(nb_obs, dtype='float32')
+        self.latres = np.zeros(nb_obs, dtype='float32')
+        self.lonres = np.zeros(nb_obs, dtype='float32')
+        self.u_res = np.zeros(nb_obs, dtype='float32')
+        self.v_res = np.zeros(nb_obs, dtype='float32')
+        
         # sst data set
         self.sst = np.zeros(nb_obs, dtype='float32')
-        #self.sst1 = np.zeros(nb_obs, dtype='float32')
-        #self.sst2 = np.zeros(nb_obs, dtype='float32')
-        #self.err_sst = np.zeros(nb_obs, dtype='float32')
-        #self.err_sst1 = np.zeros(nb_obs, dtype='float32')
-        #self.err_sst2 = np.zeros(nb_obs, dtype='float32')
-        #self.flg_sst = np.zeros(nb_obs, dtype='int8')
-        #self.flg_sst1 = np.zeros(nb_obs, dtype='int8')
-        #self.flg_sst2 = np.zeros(nb_obs, dtype='int8')
+
+        # Signal paramaters
+        self.div = np.zeros(nb_obs, dtype='float32')
+        self.Ro = np.zeros(nb_obs, dtype='float32')
+        self.R = np.zeros(nb_obs, dtype='float32')
+        self.V = np.zeros(nb_obs, dtype='float32')
+        self.omega = np.zeros(nb_obs, dtype='float32')
+        self.kappa = np.zeros(nb_obs, dtype='float32')
+        self.lambda_val = np.zeros(nb_obs, dtype='float32')
+        self.theta = np.zeros(nb_obs, dtype='float32')
+        self.phi = np.zeros(nb_obs, dtype='float32')
+        self.psi = np.zeros(nb_obs, dtype='float32')
+        self.zo = np.zeros(nb_obs, dtype='complex128')
 
     def fill_ragged_array(self, record, tid, oid):
         '''
@@ -151,107 +120,95 @@ class create_ragged_arr:
 
         # scalar
         self.id[tid] = str(ds.ID.data[0])
-        #self.wmo[tid] = ds.WMO.data[0]
-        #self.expno[tid] = ds.expno.data[0]
-        #self.deploy_date[tid] = decode_date(ds.deploy_date.data[0])
         self.deploy_lon[tid] = ds.deploy_lon.data[0]
         self.deploy_lat[tid] = ds.deploy_lat.data[0]
-        #self.end_date[tid] = decode_date(ds.end_date.data[0])
-        #self.end_lon[tid] = ds.end_lon.data[0]
-        #self.end_lat[tid] = ds.end_lat.data[0]
-        #self.drogue_lost_date[tid] = decode_date(ds.drogue_lost_date.data[0])
-        #self.type_death[tid] = ds.typedeath.data[0]
-        #self.type_buoy[tid] = ds.typebuoy.data[0]
-
+        
         # vectors
         self.longitude[oid:oid+size] = ds.longitude.data[0]
         self.latitude[oid:oid+size] = ds.latitude.data[0]
         self.time[oid:oid+size] = (ds.time.data[0])
         try: self.dt_diff[oid:oid+size] = ds.dt_diff.data[0]
         except: pass
-        self.ve[oid:oid+size] = ds.ve.data[0]
-        self.vn[oid:oid+size] = ds.vn.data[0]
-        #self.err_lat[oid:oid+size] = ds.err_lat.data[0]
-        #self.err_lon[oid:oid+size] = ds.err_lon.data[0]
-        #self.err_ve[oid:oid+size] = ds.err_ve.data[0]
-        #self.err_vn[oid:oid+size] = ds.err_vn.data[0]
-        #self.gap[oid:oid+size] = ds.gap.data[0]
-        self.sst[oid:oid+size] = (ds.sst.data[0])
-        #self.sst1[oid:oid+size] = fill_values(ds.sst1.data[0])
-        #self.sst2[oid:oid+size] = fill_values(ds.sst2.data[0])
-        #self.err_sst[oid:oid+size] = fill_values(ds.err_sst.data[0])
-        #self.err_sst1[oid:oid+size] = fill_values(ds.err_sst1.data[0])
-        #self.err_sst2[oid:oid+size] = fill_values(ds.err_sst2.data[0])
-        #self.flg_sst[oid:oid+size] = ds.flg_sst.data[0]
-        #self.flg_sst1[oid:oid+size] = ds.flg_sst1.data[0]
-        #self.flg_sst2[oid:oid+size] = ds.flg_sst2.data[0]
-        #self.drogue_status[oid:oid+size] = drogue_presence(self.drogue_lost_date[tid], self.time[oid:oid+size])
+        try: self.ve[oid:oid+size] = ds.ve.data[0]
+        except: pass
+        try: self.vn[oid:oid+size] = ds.vn.data[0]
+        except: pass
+        try: self.sst[oid:oid+size] = (ds.sst.data[0])
+        except: pass
         try: self.hpa[oid:oid+size] = ds.hpa.data[0]
+        except: pass
+        try: self.pt_d[oid:oid+size] = ds.pt_d.data[0]
+        except: pass
+        try: self.pt_x[oid:oid+size] = ds.pt_x.data[0]
+        except: pass
+        try: self.pt_y[oid:oid+size] = ds.pt_y.data[0]
+        except: pass
+        try: self.latres[oid:oid+size] = ds.latres.data[0]
+        except: pass
+        try: self.lonres[oid:oid+size] = ds.lonres.data[0]
+        except: pass
+        try: self.u_res[oid:oid+size] = ds.u_res.data[0]
+        except: pass
+        try: self.v_res[oid:oid+size] = ds.v_res.data[0]
+        except: pass
+
+        # Signal paramaters
+        try: self.div[oid:oid+size] = ds.div.data[0]
+        except: pass
+        try: self.Ro[oid:oid+size] = ds.Ro.data[0]
+        except: pass
+        try: self.R[oid:oid+size] = ds.R.data[0]
+        except: pass
+        try: self.V[oid:oid+size] = ds.V.data[0]
+        except: pass
+        try: self.omega[oid:oid+size] = ds.omega.data[0]
+        except: pass
+        try: self.kappa[oid:oid+size] = ds.kappa.data[0]
+        except: pass
+        try: self.lambda_val[oid:oid+size] = ds['lambda_val'].data[0]
+        except: pass
+        try: self.theta[oid:oid+size] = ds.theta.data[0]
+        except: pass
+        try: self.phi[oid:oid+size] = ds.phi.data[0]
+        except: pass
+        try: self.psi[oid:oid+size] = ds.psi.data[0]
+        except: pass
+        try: self.zo[oid:oid+size] = ds.zo.data[0]
         except: pass
 
     def to_xarray(self):
         ds = xr.Dataset(
             data_vars=dict(
                 rowsize=(['traj'], self.rowsize, {'long_name': 'Number of observations per trajectory', 'sample_dimension': 'obs', 'units':'-'}),
-                #location_type=(['traj'], self.location_type, {'long_name': 'Satellite-based location system', 'units':'-', 'comments':'0 (Argos), 1 (GPS)'}),
-                #WMO=(['traj'], self.wmo, {'long_name': 'World Meteorological Organization buoy identification number', 'units':'-'}),
-                #expno=(['traj'], self.expno, {'long_name': 'Experiment number', 'units':'-'}),
-                #deploy_date=(['traj'], self.deploy_date, {'long_name': 'Deployment date and time'}),
                 deploy_lon=(['traj'], self.deploy_lon, {'long_name': 'Deployment longitude', 'units':'degrees_east'}),
                 deploy_lat=(['traj'], self.deploy_lat, {'long_name': 'Deployment latitude', 'units':'degrees_north'}),
-                #end_date=(['traj'], self.end_date, {'long_name': 'End date and time'}),
-                #end_lat=(['traj'], self.end_lat, {'long_name': 'End latitude', 'units':'degrees_north'}),
-                #end_lon=(['traj'], self.end_lon, {'long_name': 'End longitude', 'units':'degrees_east'}),
-                #drogue_lost_date=(['traj'], self.drogue_lost_date, {'long_name': 'Date and time of drogue loss'}),
-                #type_death=(['traj'], self.type_death, {'long_name': 'Type of death', 'units':'-', 'comments': '0 (buoy still alive), 1 (buoy ran aground), 2 (picked up by vessel), 3 (stop transmitting), 4 (sporadic transmissions), 5 (bad batteries), 6 (inactive status)'}),
-                #type_buoy=(['traj'], self.type_buoy, {'long_name': 'Buoy type (see https://www.aoml.noaa.gov/phod/dac/dirall.html)', 'units':'-'}),
-                #DeploymentShip=(['traj'], self.deployment_ship, {'long_name': 'Name of deployment ship', 'units':'-'}),
-                #DeploymentStatus=(['traj'], self.deployment_status, {'long_name': 'Deployment status', 'units':'-'}),
-                #BuoyTypeManufacturer=(['traj'], self.buoy_type_manufacturer, {'long_name': 'Buoy type manufacturer', 'units':'-'}),
-                #BuoyTypeSensorArray=(['traj'], self.buoy_type_sensor_array, {'long_name': 'Buoy type sensor array', 'units':'-'}),
-                #CurrentProgram=(['traj'], self.current_program, {'long_name': 'Current Program', 'units':'-', '_FillValue': '-1'}),
-                #PurchaserFunding=(['traj'], self.purchaser_funding, {'long_name': 'Purchaser funding', 'units':'-'}),
-                #SensorUpgrade=(['traj'], self.sensor_upgrade, {'long_name': 'Sensor upgrade', 'units':'-'}),
-                #Transmissions=(['traj'], self.transmissions, {'long_name': 'Transmissions', 'units':'-'}),
-                #DeployingCountry=(['traj'], self.deploying_country, {'long_name': 'Deploying country', 'units':'-'}),
-                #DeploymentComments=(['traj'], self.deployment_comments, {'long_name': 'Deployment comments', 'units':'-'}),
-                #ManufactureYear=(['traj'], self.manufacture_year, {'long_name': 'Manufacture year', 'units':'-', '_FillValue': '-1'}),
-                #ManufactureMonth=(['traj'], self.manufacture_month, {'long_name': 'Manufacture month', 'units':'-', '_FillValue': '-1'}),
-                #ManufactureSensorType=(['traj'], self.manufacture_sensor_type, {'long_name': 'Manufacture Sensor Type', 'units':'-'}),
-                #ManufactureVoltage=(['traj'], self.manufacture_voltage, {'long_name': 'Manufacture voltage', 'units':'-', '_FillValue': '-1'}),
-                #FloatDiameter=(['traj'], self.float_diameter, {'long_name': 'Diameter of surface floater', 'units':'cm'}),
-                #SubsfcFloatPresence=(['traj'], self.subsfc_float_presence, {'long_name': 'Subsurface Float Presence', 'units':'-'}),
-                #DrogueType=(['traj'], self.type_buoy, {'drogue_type': 'Drogue Type', 'units':'-'}),
-                #DrogueLength=(['traj'], self.drogue_length, {'long_name': 'Length of drogue.', 'units':'m'}),
-                #DrogueBallast=(['traj'], self.drogue_ballast, {'long_name': "Weight of the drogue's ballast.", 'units':'kg'}),
-                #DragAreaAboveDrogue=(['traj'], self.drag_area_above_drogue, {'long_name': 'Drag area above drogue.', 'units':'m^2'}),
-                #DragAreaOfDrogue=(['traj'], self.drag_area_drogue, {'long_name': 'Drag area drogue.', 'units':'m^2'}),
-                #DragAreaRatio=(['traj'], self.drag_area_ratio, {'long_name': 'Drag area ratio', 'units':'m'}),
-                #DrogueCenterDepth=(['traj'], self.drag_center_depth, {'long_name': 'Average depth of the drogue.', 'units':'m'}),
-                #DrogueDetectSensor=(['traj'], self.drogue_detect_sensor, {'long_name': 'Drogue detection sensor', 'units':'-'}),
-
+                
                 # position and velocity
                 dt_diff=(['obs'], self.dt_diff, {'long_name': 'Time interval between previous and next location', 'units':'s'}),
                 ve=(['obs'], self.ve, {'long_name': 'Eastward velocity', 'units':'m/s'}),
                 vn=(['obs'], self.vn, {'long_name': 'Northward velocity', 'units':'m/s'}),
-                #gap=(['obs'], self.gap, {'long_name': 'Time interval between previous and next location', 'units':'s'}),
-                #err_lat=(['obs'], self.err_lat, {'long_name': '95% confidence interval in latitude', 'units':'degrees_north'}),
-                #err_lon=(['obs'], self.err_lon, {'long_name': '95% confidence interval in longitude', 'units':'degrees_east'}),
-                #err_ve=(['obs'], self.err_ve, {'long_name': '95% confidence interval in eastward velocity', 'units':'m/s'}),
-                #err_vn=(['obs'], self.err_vn, {'long_name': '95% confidence interval in northward velocity', 'units':'m/s'}),
-                #drogue_status=(['obs'], self.drogue_status, {'long_name': 'Status indicating the presence of the drogue', 'units':'-', 'flag_values':'1,0', 'flag_meanings': 'drogued, undrogued'}),
-
-                # sst
+                latres=(['obs'], self.latres, {'long_name': 'Latitude resolution', 'units':'degrees_north'}),
+                lonres=(['obs'], self.lonres, {'long_name': 'Longitude resolution', 'units':'degrees_east'}),
+                u_res=(['obs'], self.u_res, {'long_name': 'Eastward residual velocity', 'units':'m/s'}),
+                v_res=(['obs'], self.v_res, {'long_name': 'Northward residual velocity', 'units':'m/s'}),
+                pt_d=(['obs'], self.pt_d, {'long_name': 'Distance to previous location', 'units':'m'}),
+                pt_x=(['obs'], self.pt_x, {'long_name': 'Distance to previous location in x', 'units':'m'}),
+                pt_y=(['obs'], self.pt_y, {'long_name': 'Distance to previous location in y', 'units':'m'}),
+                
+                # sst hpa
                 sst=(['obs'], self.sst, {'long_name': 'Fitted sea water temperature', 'units':'Kelvin', 'comments': 'Estimated near-surface sea water temperature from drifting buoy measurements. It is the sum of the fitted near-surface non-diurnal sea water temperature and fitted diurnal sea water temperature anomaly. Discrepancies may occur because of rounding.'}),
                 hpa=(['obs'], self.hpa, {'long_name': 'Fitted sea-level air pressure', 'units':'hPa', 'comments': 'Sea-level air pressure from drifting buoy measurements.'}),
-                #sst1=(['obs'], self.sst1, {'long_name': 'Fitted non-diurnal sea water temperature', 'units':'Kelvin', 'comments': 'Estimated near-surface non-diurnal sea water temperature from drifting buoy measurements'}),
-                #sst2=(['obs'], self.sst2, {'long_name': 'Fitted diurnal sea water temperature anomaly', 'units':'Kelvin', 'comments': 'Estimated near-surface diurnal sea water temperature anomaly from drifting buoy measurements'}),
-                #err_sst=(['obs'], self.err_sst, {'long_name': 'Standard uncertainty of fitted sea water temperature', 'units':'Kelvin', 'comments': 'Estimated one standard error of near-surface sea water temperature estimate from drifting buoy measurements'}),
-                #err_sst1=(['obs'], self.err_sst1, {'long_name': 'Standard uncertainty of fitted non-diurnal sea water temperature', 'units':'Kelvin', 'comments': 'Estimated one standard error of near-surface non-diurnal sea water temperature estimate from drifting buoy measurements'}),
-                #err_sst2=(['obs'], self.err_sst2, {'long_name': 'Standard uncertainty of fitted diurnal sea water temperature anomaly', 'units':'Kelvin', 'comments': 'Estimated one standard error of near-surface diurnal sea water temperature anomaly estimate from drifting buoy measurements'}),
-                #flg_sst=(['obs'], self.flg_sst, {'long_name': 'Fitted sea water temperature quality flag', 'units':'-', 'flag_values':'0, 1, 2, 3, 4, 5', 'flag_meanings': 'no-estimate, no-uncertainty-estimate, estimate-not-in-range-uncertainty-not-in-range, estimate-not-in-range-uncertainty-in-range estimate-in-range-uncertainty-not-in-range, estimate-in-range-uncertainty-in-range'}),
-                #flg_sst1=(['obs'], self.flg_sst1, {'long_name': 'Fitted non-diurnal sea water temperature quality flag', 'units':'-', 'flag_values':'0, 1, 2, 3, 4, 5', 'flag_meanings': 'no-estimate, no-uncertainty-estimate, estimate-not-in-range-uncertainty-not-in-range, estimate-not-in-range-uncertainty-in-range estimate-in-range-uncertainty-not-in-range, estimate-in-range-uncertainty-in-range'}),
-                #flg_sst2=(['obs'], self.flg_sst2, {'long_name': 'Fitted diurnal sea water temperature anomaly quality flag', 'units':'-', 'flag_values':'0, 1, 2, 3, 4, 5', 'flag_meanings': 'no-estimate, no-uncertainty-estimate, estimate-not-in-range-uncertainty-not-in-range, estimate-not-in-range-uncertainty-in-range estimate-in-range-uncertainty-not-in-range, estimate-in-range-uncertainty-in-range'}),
+                div=(['obs'], self.div, {'long_name': 'Normalized Divergence', 'units':'-'}),
+                Ro=(['obs'], self.Ro, {'long_name': 'Rossby number', 'units':'-'}),
+                R=(['obs'], self.R, {'long_name': 'Eddy Radius', 'units':'Km'}),
+                V=(['obs'], self.V, {'long_name': 'Eddy Velocity', 'units':'m/s'}),
+                omega=(['obs'], self.omega, {'long_name': 'Non-dimensional instantaneous frequency', 'units':'-'}),
+                kappa=(['obs'], self.kappa, {'long_name': 'Ellipse amplitude', 'units':'Km'}),
+                lambda_val=(['obs'], self.lambda_val, {'long_name': 'Ellipse linearity', 'units':'-'}),
+                theta=(['obs'], self.theta, {'long_name': 'Ellipse orientation', 'units':'Radians'}),
+                phi=(['obs'], self.phi, {'long_name': 'Ellipse phase', 'units':'-'}),
+                psi=(['obs'], self.psi, {'long_name': 'Particle position in ellipse', 'units':'-'}),
+                zo=(['obs'], self.zo, {'long_name': 'Ellipse center', 'units':'-'}),
              ),
 
             coords=dict(
@@ -271,3 +228,458 @@ class create_ragged_arr:
         #ds.time.encoding['units'] = 'seconds since 1970-01-01 00:00:00'
 
         return ds
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
+
+from scipy.interpolate import interp1d, LinearNDInterpolator, griddata
+from pykrige.ok import OrdinaryKriging
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+class LagrangianInterpolator:
+    """
+    A class to interpolate Lagrangian trajectory data to hourly positions
+    using various interpolation methods including kriging. Currently only works
+    with latitude, longitude, and time.
+    """
+
+    def __init__(self, data=None, lat_col='latitude', lon_col='longitude', time_col='time'):
+        """
+        Initialize the interpolator with optional data.
+        
+        Parameters:
+        -----------
+        data : pandas.DataFrame
+            DataFrame containing the Lagrangian data with lat, lon, and time columns
+        lat_col : str
+            Name of the latitude column
+        lon_col : str
+            Name of the longitude column
+        time_col : str
+            Name of the time column (should be convertible to datetime)
+        """
+        self.lat_col = lat_col
+        self.lon_col = lon_col
+        self.time_col = time_col
+        
+        if data is not None:
+            self.load_data(data)
+    
+    def load_data(self, data):
+        """
+        Load data into the interpolator and prepare it for processing.
+        
+        Parameters:
+        -----------
+        data : pandas.DataFrame
+            DataFrame containing the Lagrangian data
+        """
+        self.data = data.copy()
+        
+        # Ensure time is in datetime format
+        if not pd.api.types.is_datetime64_any_dtype(self.data[self.time_col]):
+            self.data[self.time_col] = pd.to_datetime(self.data[self.time_col])
+        
+        # Sort by time
+        self.data = self.data.sort_values(by=self.time_col)
+        
+        # Convert times to numeric for interpolation
+        self.data['time_numeric'] = (self.data[self.time_col] - self.data[self.time_col].min()).dt.total_seconds()
+        
+        print(f"Loaded {len(self.data)} data points spanning from "
+              f"{self.data[self.time_col].min()} to {self.data[self.time_col].max()}")
+    
+    def interpolate_linear(self, target_times=None, hourly=True):
+        """
+        Perform linear interpolation to get positions at regular time intervals.
+        
+        Parameters:
+        -----------
+        target_times : list or pandas.Series
+            List of target times for interpolation. If None, hourly times will be generated.
+        hourly : bool
+            If True and target_times is None, generate hourly times for interpolation
+        
+        Returns:
+        --------
+        pandas.DataFrame
+            DataFrame with interpolated positions at target times
+        """
+        if target_times is None:
+            # Generate hourly times if not provided
+            start_time = self.data[self.time_col].min()
+            end_time = self.data[self.time_col].max()
+            
+            if hourly:
+                # Round to the nearest hour
+                start_time = start_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                end_time = end_time.replace(minute=0, second=0, microsecond=0)
+                
+                # Generate hourly times
+                target_times = pd.date_range(start=start_time, end=end_time, freq='H')
+            else:
+                # Use original times (for testing)
+                target_times = self.data[self.time_col]
+        
+        # Convert target times to numeric for interpolation
+        target_times_numeric = [(t - self.data[self.time_col].min()).total_seconds() for t in target_times]
+        
+        # Create interpolation functions for latitude and longitude
+        f_lat = interp1d(self.data['time_numeric'], self.data[self.lat_col], 
+                        bounds_error=False, fill_value="extrapolate")
+        f_lon = interp1d(self.data['time_numeric'], self.data[self.lon_col], 
+                        bounds_error=False, fill_value="extrapolate")
+        
+        # Interpolate at target times
+        lat_interp = f_lat(target_times_numeric)
+        lon_interp = f_lon(target_times_numeric)
+        
+        # Create result dataframe
+        result = pd.DataFrame({
+            self.time_col: target_times,
+            self.lat_col: lat_interp,
+            self.lon_col: lon_interp,
+            'method': 'linear'
+        })
+        
+        return result
+    
+    def interpolate_kriging(self, target_times=None, hourly=True, variogram_model='linear'):
+        """
+        Use Ordinary Kriging to interpolate positions.
+        Note: This is a simplified implementation that treats time as a spatial dimension.
+        For more complex spatiotemporal kriging, specialized libraries are recommended.
+        
+        Parameters:
+        -----------
+        target_times : list or pandas.Series
+            List of target times for interpolation. If None, hourly times will be generated.
+        hourly : bool
+            If True and target_times is None, generate hourly times for interpolation
+        variogram_model : str
+            Variogram model to use for kriging ('linear', 'power', 'gaussian', 'spherical', 'exponential')
+            
+        Returns:
+        --------
+        pandas.DataFrame
+            DataFrame with interpolated positions at target times
+        """
+        if target_times is None:
+            # Generate hourly times if not provided
+            start_time = self.data[self.time_col].min()
+            end_time = self.data[self.time_col].max()
+            
+            if hourly:
+                # Round to the nearest hour
+                start_time = start_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                end_time = end_time.replace(minute=0, second=0, microsecond=0)
+                
+                # Generate hourly times
+                target_times = pd.date_range(start=start_time, end=end_time, freq='H')
+            else:
+                # Use original times (for testing)
+                target_times = self.data[self.time_col]
+        
+        # Convert target times to numeric for interpolation
+        target_times_numeric = np.array([(t - self.data[self.time_col].min()).total_seconds() 
+                                        for t in target_times])
+        
+        # Normalize time values to be on a similar scale as lat/lon
+        time_scale = self.data['time_numeric'].max() / 100
+        time_values_norm = self.data['time_numeric'] / time_scale
+        target_times_norm = target_times_numeric / time_scale
+        
+        # Create the kriging models
+        # For latitude
+        OK_lat = OrdinaryKriging(
+            time_values_norm,
+            np.zeros_like(time_values_norm),  # Placeholder for second spatial dimension
+            self.data[self.lat_col],
+            variogram_model=variogram_model,
+            verbose=False,
+            enable_plotting=False
+        )
+        
+        # For longitude
+        OK_lon = OrdinaryKriging(
+            time_values_norm,
+            np.zeros_like(time_values_norm),  # Placeholder for second spatial dimension
+            self.data[self.lon_col],
+            variogram_model=variogram_model,
+            verbose=False,
+            enable_plotting=False
+        )
+        
+        # Perform kriging
+        lat_interp, lat_var = OK_lat.execute('points', target_times_norm, np.zeros_like(target_times_norm))
+        lon_interp, lon_var = OK_lon.execute('points', target_times_norm, np.zeros_like(target_times_norm))
+        
+        # Create result dataframe
+        result = pd.DataFrame({
+            self.time_col: target_times,
+            self.lat_col: lat_interp,
+            self.lon_col: lon_interp,
+            'lat_variance': lat_var,
+            'lon_variance': lon_var,
+            'method': 'kriging'
+        })
+        
+        return result
+    
+    def interpolate_idw(self, target_times=None, hourly=True, power=2):
+        """
+        Use Inverse Distance Weighting (IDW) to interpolate positions.
+        
+        Parameters:
+        -----------
+        target_times : list or pandas.Series
+            List of target times for interpolation. If None, hourly times will be generated.
+        hourly : bool
+            If True and target_times is None, generate hourly times for interpolation
+        power : float
+            Power parameter for IDW (higher values give more weight to closer points)
+            
+        Returns:
+        --------
+        pandas.DataFrame
+            DataFrame with interpolated positions at target times
+        """
+        if target_times is None:
+            # Generate hourly times if not provided
+            start_time = self.data[self.time_col].min()
+            end_time = self.data[self.time_col].max()
+            
+            if hourly:
+                # Round to the nearest hour
+                start_time = start_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                end_time = end_time.replace(minute=0, second=0, microsecond=0)
+                
+                # Generate hourly times
+                target_times = pd.date_range(start=start_time, end=end_time, freq='H')
+            else:
+                # Use original times (for testing)
+                target_times = self.data[self.time_col]
+        
+        # Convert target times to numeric for interpolation
+        target_times_numeric = np.array([(t - self.data[self.time_col].min()).total_seconds() 
+                                       for t in target_times])
+        
+        # IDW implementation
+        lat_interp = []
+        lon_interp = []
+        
+        for target_time in target_times_numeric:
+            # Calculate temporal distances
+            distances = np.abs(self.data['time_numeric'] - target_time)
+            
+            # Handle exact matches to avoid division by zero
+            if np.any(distances == 0):
+                exact_matches = distances == 0
+                lat_interp.append(np.mean(self.data.loc[exact_matches, self.lat_col]))
+                lon_interp.append(np.mean(self.data.loc[exact_matches, self.lon_col]))
+                continue
+            
+            # Calculate weights
+            weights = 1.0 / (distances ** power)
+            sum_weights = np.sum(weights)
+            
+            # Calculate weighted averages
+            lat_val = np.sum(weights * self.data[self.lat_col].values) / sum_weights
+            lon_val = np.sum(weights * self.data[self.lon_col].values) / sum_weights
+            
+            lat_interp.append(lat_val)
+            lon_interp.append(lon_val)
+        
+        # Create result dataframe
+        result = pd.DataFrame({
+            self.time_col: target_times,
+            self.lat_col: lat_interp,
+            self.lon_col: lon_interp,
+            'method': 'idw'
+        })
+        
+        return result
+    
+    def plot_trajectories(self, original=True, interpolated=None, methods=None, basemap=False):
+        """
+        Plot original and interpolated trajectories.
+        
+        Parameters:
+        -----------
+        original : bool
+            Whether to plot the original data points
+        interpolated : pandas.DataFrame or list of pandas.DataFrame
+            The interpolated data to plot
+        methods : list of str
+            Names of methods to include in the plot (if None, plot all)
+        basemap : bool
+            Whether to add a basemap (requires contextily package)
+        """
+        plt.figure(figsize=(12, 8))
+        
+        # Plot original data if requested
+        if original:
+            plt.scatter(self.data[self.lon_col], self.data[self.lat_col], color='k', 
+                    label='Original data', s=8, alpha=0.7)
+        
+        # Plot interpolated data
+        if interpolated is not None:
+            # Convert to list if single DataFrame
+            if isinstance(interpolated, pd.DataFrame):
+                interpolated = [interpolated]
+            
+            for interp_df in interpolated:
+                # Filter by methods if specified
+                if methods is not None:
+                    for method in methods:
+                        subset = interp_df[interp_df['method'] == method]
+                        if not subset.empty:
+                            plt.scatter(subset[self.lon_col], subset[self.lat_col], s=8, 
+                                   label=f'{method.capitalize()} interpolation', alpha=0.7)
+                else:
+                    # If multiple methods in one DataFrame, plot each separately
+                    for method in interp_df['method'].unique():
+                        subset = interp_df[interp_df['method'] == method]
+                        plt.scatter(subset[self.lon_col], subset[self.lat_col], s=8,
+                               label=f'{method.capitalize()} interpolation', alpha=0.7)
+        
+        # Add basemap if requested
+        if basemap:
+            try:
+                import contextily as ctx
+                ctx.add_basemap(plt.gca(), crs="EPSG:4326", source=ctx.providers.OpenStreetMap.Mapnik)
+            except ImportError:
+                print("contextily package not found. Install it to use basemaps.")
+        
+        plt.xlabel('Longitude')
+        plt.ylabel('Latitude')
+        plt.title('Lagrangian Trajectory Interpolation')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        
+        return plt.gcf()
+    
+    def plot_3d_trajectory(self, original=True, interpolated=None, methods=None):
+        """
+        Create a 3D plot with time as the z-axis.
+        
+        Parameters:
+        -----------
+        original : bool
+            Whether to plot the original data points
+        interpolated : pandas.DataFrame or list of pandas.DataFrame
+            The interpolated data to plot
+        methods : list of str
+            Names of methods to include in the plot (if None, plot all)
+        """
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Plot original data if requested
+        if original:
+            times_orig = (self.data[self.time_col] - self.data[self.time_col].min()).dt.total_seconds() / 3600  # hours
+            ax.scatter(self.data[self.lon_col], self.data[self.lat_col], times_orig, 
+                      c='k', label='Original data', s=50, alpha=0.7)
+            ax.plot(self.data[self.lon_col], self.data[self.lat_col], times_orig, 'k-', alpha=0.5)
+        
+        # Plot interpolated data
+        if interpolated is not None:
+            # Convert to list if single DataFrame
+            if isinstance(interpolated, pd.DataFrame):
+                interpolated = [interpolated]
+            
+            colors = ['red', 'blue', 'green', 'purple', 'orange']
+            color_idx = 0
+            
+            for interp_df in interpolated:
+                # Convert times to hours for better visualization
+                interp_df['time_hours'] = (interp_df[self.time_col] - self.data[self.time_col].min()).dt.total_seconds() / 3600
+                
+                # Filter by methods if specified
+                if methods is not None:
+                    for method in methods:
+                        subset = interp_df[interp_df['method'] == method]
+                        if not subset.empty:
+                            ax.scatter(subset[self.lon_col], subset[self.lat_col], subset['time_hours'],
+                                      c=colors[color_idx % len(colors)], label=f'{method.capitalize()} interpolation', s=30, alpha=0.7)
+                            ax.plot(subset[self.lon_col], subset[self.lat_col], subset['time_hours'],
+                                  c=colors[color_idx % len(colors)], alpha=0.5)
+                            color_idx += 1
+                else:
+                    # If multiple methods in one DataFrame, plot each separately
+                    for method in interp_df['method'].unique():
+                        subset = interp_df[interp_df['method'] == method]
+                        ax.scatter(subset[self.lon_col], subset[self.lat_col], subset['time_hours'],
+                                  c=colors[color_idx % len(colors)], label=f'{method.capitalize()} interpolation', s=30, alpha=0.7)
+                        ax.scatter(subset[self.lon_col], subset[self.lat_col], subset['time_hours'],
+                              c=colors[color_idx % len(colors)], alpha=0.5)
+                        color_idx += 1
+        
+        ax.set_xlabel('Longitude')
+        ax.set_ylabel('Latitude')
+        ax.set_zlabel('Time (hours)')
+        ax.set_title('3D Lagrangian Trajectory (Time as Z-axis)')
+        plt.legend()
+        
+        return fig
+
+## Example usage
+#if __name__ == "__main__":
+#    # Create some example data
+#    # In a real-world scenario, you would load this from a file or database
+#    np.random.seed(42)
+#    
+#    # Generate random times (2 days, 4-hour intervals)
+#    n_points = 12
+#    start_time = datetime(2025, 5, 1, 0, 0, 0)
+#    times = [start_time + timedelta(hours=4*i) for i in range(n_points)]
+#    
+#    # Generate random lat/lon that form a somewhat realistic trajectory
+#    lons = np.cumsum(np.random.normal(0, 0.1, n_points)) - 122.0
+#    lats = np.cumsum(np.random.normal(0, 0.08, n_points)) + 37.0
+#    
+#    # Create a dataframe
+#    df = pd.DataFrame({
+#        'time': times,
+#        'latitude': lats,
+#        'longitude': lons
+#    })
+#    
+#    print("Example data:")
+#    print(df)
+#    
+#    # Initialize the interpolator with the data
+#    interpolator = LagrangianInterpolator(df)
+#    
+#    # Perform linear interpolation to hourly positions
+#    linear_interp = interpolator.interpolate_linear()
+#    
+#    # Perform kriging interpolation
+#    try:
+#        kriging_interp = interpolator.interpolate_kriging(variogram_model='linear')
+#        print("\nKriging interpolation successful")
+#    except Exception as e:
+#        print(f"\nKriging failed: {e}")
+#        kriging_interp = None
+#    
+#    # Perform IDW interpolation
+#    idw_interp = interpolator.interpolate_idw(power=2)
+#    
+#    # Combine all results
+#    all_interp = pd.concat([linear_interp, 
+#                          kriging_interp if kriging_interp is not None else pd.DataFrame(), 
+#                          idw_interp])
+#    
+#    print("\nInterpolated results sample:")
+#    print(all_interp.head())
+#    
+#    # Plot the results
+#    interpolator.plot_trajectories(interpolated=all_interp)
+#    plt.savefig('trajectory_comparison.png')
+#    
+#    # 3D plot
+#    interpolator.plot_3d_trajectory(interpolated=all_interp)
+#    plt.savefig('trajectory_3d.png')
+#    
+#    plt.show()

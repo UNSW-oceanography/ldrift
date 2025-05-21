@@ -27,6 +27,7 @@ import cartopy.feature as cfeature
 import cmocean
 import matplotlib.animation as animation # For animations (not used atm)
 from PIL import Image # For animations
+import glob
 
 
 def get_traj_index(ds) -> np.array: # IGNORE THIS FUNCTION IF JUST USING OPENDRIFT SIMS
