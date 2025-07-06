@@ -4,9 +4,10 @@
 
 _Coastal and Regional Oceanography Laboratory, UNSW Sydney_
 
-This repository contains functions to analyse Lagrangian (fluid flowing) ocean drifter data - namely, Surface Velocity Program (SVP) drifters from the Global Drifter Program (GDP) operated by NOAA. The drift_funcs script provides tools usable with any GDP v2.0 ([Elipot et al., 2022](https://doi.org/10.25921/x46c-3620)) formatted files (i.e., ragged contiguous arrays), which can be found [here](https://www.nodc.noaa.gov/archive/arc0199/0248584/1.1/data/0-data/). The example notebook runs through the processing and analysis conducted in the associated paper (Matisons et al., in prep), and shows the workflow (e.g., calculate single and pairwise statistics and mapping of variables such as eddy diffusivity) for analysing drifter datasets.
+This repository contains functions to analyse Lagrangian (fluid flowing) ocean drifter data - namely, Surface Velocity Program (SVP) drifters from the Global Drifter Program (GDP) operated by NOAA. The drift_funcs script provides tools usable with any GDP v2.0+ ([Elipot et al., 2022](https://doi.org/10.25921/x46c-3620)) formatted files (i.e., ragged contiguous arrays), which can be found [here](https://www.nodc.noaa.gov/archive/arc0199/0248584/1.1/data/0-data/). The example notebook runs through the processing and analysis conducted in the associated paper ([Matisons et al., 2025](https://doi.org/10.1016/j.pocean.2025.103498)), and shows the workflow (e.g., calculate single and pairwise statistics and mapping of variables such as eddy diffusivity) for analysing drifter datasets.
+### NOTE: Before continuing, please be aware that this code is published primarily for replication purposes and may not always function as specified (i.e., use it at your own risk).
 
-## How to install and run ldrift
+## How to install and run ldrift  
 Clone the repository using [Anaconda](https://www.anaconda.com/download/) / [Miniconda](https://docs.anaconda.com/miniconda/#miniconda-latest-installer-links).
 ```
 git clone https://github.com/UNSW-oceanography/ldrift
