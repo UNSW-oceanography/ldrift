@@ -162,6 +162,7 @@ def create_ragged(ds):
         if len(ds.latitude[slice(traj_idx[i], trajsum[i])]) == 0:
             pass
         else:
+            wmo = (ds.WMO[traj_idx[i]].astype(np.int64()))
             lats = ds.latitude[slice(traj_idx[i], trajsum[i])]
             lons = ds.longitude[slice(traj_idx[i], trajsum[i])]
             times = ds.time[slice(traj_idx[i], trajsum[i])]
@@ -171,6 +172,8 @@ def create_ragged(ds):
             try: vn = ds.vn[slice(traj_idx[i], trajsum[i])]
             except AttributeError: vn = np.full_like(lats, np.nan)
             ids = np.full_like(lats, traj)
+            try: drogue_lost_date = ds.drogue_lost_date[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: drogue_lost_date = np.full_like(lats, np.nan)
             try: ssts = ds.sst[slice(traj_idx[i], trajsum[i])]
             except AttributeError: ssts = np.full_like(lats, np.nan)
             try: hpa = ds.hpa[slice(traj_idx[i], trajsum[i])]
@@ -211,17 +214,21 @@ def create_ragged(ds):
             except AttributeError: psi = np.full_like(lats, np.nan)
             try: zo = ds.zo[slice(traj_idx[i], trajsum[i])]
             except AttributeError: zo = np.full_like(lats, np.nan)
+            try: Ls = ds.Ls[slice(traj_idx[i], trajsum[i])]
+            except AttributeError: Ls = np.full_like(lats, np.nan)
 
             len_obs = len(ids)
 
             record = { 
                 "ID": xr.DataArray([traj], dims={"traj": [1]}),
+                "WMO": xr.DataArray([wmo], dims={"traj": [1]}),
                 "deploy_lon": xr.DataArray([lons[0]], dims={"traj": [1]}),
                 "deploy_lat": xr.DataArray([lats[0]], dims={"traj": [1]}),
                 "latitude": xr.DataArray([lats], dims={"traj": [1], "obs": np.arange(len_obs)}),
                 "longitude": xr.DataArray([lons], dims={"traj": [1], "obs": np.arange(len_obs)}),
                 "time": xr.DataArray([times], dims={"traj": [1], "obs": np.arange(len_obs)}),
                 "sst": xr.DataArray([ssts], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "drogue_lost_date": xr.DataArray([drogue_lost_date], dims={"traj": [1], "obs": np.arange(len_obs)}),
                 "ve": xr.DataArray([ve], dims={"traj": [1], "obs": np.arange(len_obs)}),
                 "vn": xr.DataArray([vn], dims={"traj": [1], "obs": np.arange(len_obs)}),
                 "hpa": xr.DataArray([hpa], dims={"traj": [1], "obs": np.arange(len_obs)}),
@@ -242,7 +249,8 @@ def create_ragged(ds):
                 "theta": xr.DataArray([theta], dims={"traj": [1], "obs": np.arange(len_obs)}),
                 "phi": xr.DataArray([phi], dims={"traj": [1], "obs": np.arange(len_obs)}),
                 "psi": xr.DataArray([psi], dims={"traj": [1], "obs": np.arange(len_obs)}),
-                "zo": xr.DataArray([zo], dims={"traj": [1], "obs": np.arange(len_obs)}),   
+                "zo": xr.DataArray([zo], dims={"traj": [1], "obs": np.arange(len_obs)}),
+                "Ls": xr.DataArray([Ls], dims={"traj": [1], "obs": np.arange(len_obs)}),
             }
             records.append(record)
 
@@ -359,14 +367,14 @@ def get_diff_dt(ds, checkgap: np.int64 = None) -> xr.Dataset:
                     start_idx = 0
                     end_idx = break_idx
                 elif j == len(break_indices):
-                    start_idx = break_indices[j-1] + 1
+                    start_idx = break_idx
                     end_idx = len(ids)
                 else:
                     start_idx = break_indices[j-1] + 1
                     end_idx = break_idx
 
-                if (start_idx == end_idx) or (breaks is False):
-                    continue
+                #if (start_idx == end_idx) or (breaks is False):
+                #    continue
 
                 len_obs = len(ids[start_idx:end_idx])
                 #print([start_idx, end_idx])
@@ -394,6 +402,31 @@ def get_diff_dt(ds, checkgap: np.int64 = None) -> xr.Dataset:
 
         new_ds = ds.assign(dt_diff=('obs', dt_diffs))
         return new_ds
+
+
+def fillbad(arr1, arr2):
+    """
+    Fill bad data in a 2D array using interpolation.
+    
+    Parameters:
+    x (array-like): 1D array of x coordinates
+    y (array-like): 1D array of y coordinates
+    method (str): Interpolation method (default: 'linear')
+    
+    Returns:
+    array-like: Interpolated 2D array
+    """
+    arr2_filled = arr2.copy()
+    arr1_filled = arr1.copy()
+    
+    nans = np.isnan(arr1)
+    if np.all(nans):
+        raise ValueError("Array contains only NaNs.")
+    x = np.arange(len(arr1))
+    y = np.arange(len(arr2))
+    arr1_filled[nans] = np.interp(x[nans], x[~nans], arr1[~nans])
+    arr2_filled[nans] = np.interp(y[nans], y[~nans], arr2[~nans])
+    return arr1_filled, arr2_filled
 
 
 def loess_smoothing_with_time(lat_values, lon_values, time_values, window_size=8, degree=2, 
@@ -468,11 +501,7 @@ def loess_smoothing_with_time(lat_values, lon_values, time_values, window_size=8
     lon_values = np.array(lon_values)
     
     # Ensure time_values are datetime objects
-    if not isinstance(time_values[0], datetime.datetime):
-        try:
-            time_values = np.array([pd.to_datetime(t) for t in time_values])
-        except:
-            raise ValueError("Time values must be convertible to datetime objects")
+    time_values = np.array([pd.to_datetime(t) for t in time_values])
     
     # Check that all inputs are the same length
     if not (len(lat_values) == len(lon_values) == len(time_values)):
@@ -556,13 +585,14 @@ def xarr_to_mat(ds, filename='xarr_to_mat_tmp', path='c:/Users/z5493451/OneDrive
         time = ds.time[slice(traj_idx[i], trajsum[i])].values
         lat = ds.latitude[slice(traj_idx[i], trajsum[i])].values
         lon = ds.longitude[slice(traj_idx[i], trajsum[i])].values
+        ids = ds.ids[slice(traj_idx[i], trajsum[i])].astype(np.int64()).values
         try: hpa = ds.hpa[slice(traj_idx[i], trajsum[i])].values
         except AttributeError: hpa = np.full_like(lat, np.nan)
         try: sst = ds.sst[slice(traj_idx[i], trajsum[i])].values
         except AttributeError: sst = np.full_like(lat, np.nan)
 
-        lat_diff = np.abs(np.diff(lat, prepend=lat[0]))  # Prepend to keep the array size the same
-        lon_diff = np.abs(np.diff(lon, prepend=lon[0]))
+        #lat_diff = np.abs(np.diff(lat, prepend=lat[0]))  # Prepend to keep the array size the same
+        #lon_diff = np.abs(np.diff(lon, prepend=lon[0]))
 
         t = matlab_datenum(time)
         # Create the list structure without extra dimensions
@@ -572,7 +602,8 @@ def xarr_to_mat(ds, filename='xarr_to_mat_tmp', path='c:/Users/z5493451/OneDrive
         # Construct a dictionary with named fields for MATLAB
         x_dict = {
             'x': x,   # Longitude data
-            't': t,   # Time 
+            't': t,   # Time
+            'ids': ids, # IDs for each trajectory
             'sst': sst, # Temperature
             'hpa': hpa # SL Air Pressure
         }
@@ -580,7 +611,8 @@ def xarr_to_mat(ds, filename='xarr_to_mat_tmp', path='c:/Users/z5493451/OneDrive
         # Construct a dictionary with named fields for MATLAB
         y_dict = {
             'y': y,   # Latitude data
-            't': t   # Time data
+            't': t,   # Time data
+            'ids': ids # IDs for each trajectory
         }
 
         x_traj_mat.append(x_dict)
@@ -603,6 +635,8 @@ def get_velocities(ds, tinf = 200.0, primes: bool = True):
     u_devs = []
     v_devs = []
     traj_dts = []
+    normalized_dts = []
+    omegas = []
 
     for i in range(len(ds.traj.values)): # Seperate trajectories into individual arrays
         if primes:
@@ -612,10 +646,18 @@ def get_velocities(ds, tinf = 200.0, primes: bool = True):
         velocities_tot_i = ds.v_total[slice(traj_idx[i], trajsum[i])].values
         u_i = ds.ve[slice(traj_idx[i], trajsum[i])].values
         v_i = ds.vn[slice(traj_idx[i], trajsum[i])].values
-        traj_dt_i = ds.dt[slice(traj_idx[i], trajsum[i])].values / 3600 / 24
+        #print(ds.dt[slice(traj_idx[i], trajsum[i])].values[1])
+        if ds.dt[slice(traj_idx[i], trajsum[i])].values[1] == 3600:
+            traj_dt_i = ds.dt[slice(traj_idx[i], trajsum[i])].values / 3600 / 24
+        elif ds.dt[slice(traj_idx[i], trajsum[i])].values[1] == 21600:
+            traj_dt_i = ds.dt[slice(traj_idx[i], trajsum[i])].values / 21600 / 24
+        else:
+            traj_dt_i = ds.dt[slice(traj_idx[i], trajsum[i])].values
+        #print('traj_dt_i:', traj_dt_i)
 
         # Cut each traj at tinf or set to na if not found
         tinf_idx = find_index(arr=traj_dt_i, x=tinf, threshold=0)
+        #print('tinf_idx:', tinf_idx)
         if np.isnan(tinf_idx):
             continue
         else:
@@ -634,8 +676,19 @@ def get_velocities(ds, tinf = 200.0, primes: bool = True):
                 velocity_devs.append(devs_tot_i)
                 u_devs.append(devs_u)
                 v_devs.append(devs_v)
+            if (ds.Ls.values) is not None:
+                Ls_i = ds.Ls[slice(traj_idx[i], trajsum[i])].values
+                Ls_i = Ls_i[:tinf_idx]
+                normalized_dt_i = traj_dt_i / Ls_i
+                normalized_dts.append(normalized_dt_i)
+                omega_i = ds.omega[slice(traj_idx[i], trajsum[i])].values
+                omega_i = omega_i[:tinf_idx]
+                omegas.append(omega_i)
+            else:
+                normalized_dts.append(np.nan)
+                omegas.append(np.nan)
 
-    return velocities, us, vs, velocity_devs, u_devs, v_devs, traj_dts
+    return velocities, us, vs, velocity_devs, u_devs, v_devs, traj_dts, normalized_dts, omegas
 
 
 def find_index(arr, threshold, x):
@@ -802,6 +855,7 @@ def retrieve_region(ds, lon: any = None, lat: any = None, min_time: any = None, 
                     month_range: any = None, year_range: any = None,
                     ids: any = None, deplat: any = None, deplon: any = None, deptime: any = None,
                     wmos: any = None, full: bool = True, debug = False, not_ids: any = None,
+                    omega: any = None, R: any = None, Ro: any = None, dt_P_range: any = None,
                     dt_range: any = None, vertices: any = None, clip_vertices: bool = False) -> xr.Dataset:
     '''Subset a ragged array drifter dataset for a region in space and time using coords
         to subset by obs and variables to subset by trajs. Modified from the Philippe et al.
@@ -871,6 +925,9 @@ def retrieve_region(ds, lon: any = None, lat: any = None, min_time: any = None, 
 
     if ids is not None: # Mask IDs
         mask &= np.isin(ds.ids, ids)
+        if not np.isin(ds.ids, ids).any():
+            print('No valid drifters based on supplied IDs.')
+            print(ids)
 
     if not_ids is not None:  # remove unwanted ids
         mask &= ~np.isin(ds.ids, not_ids)
@@ -878,6 +935,18 @@ def retrieve_region(ds, lon: any = None, lat: any = None, min_time: any = None, 
     if dt_range is not None: # Mask out observations based on a set length (e.g., 100 days)
         ds = get_dt(ds) # Sets the dt parameter for each trajectory
         mask &= (ds.dt >= dt_range[0]) & (ds.dt <= dt_range[1])
+
+    if omega is not None: # Mask based on omega values
+        mask &= (ds.omega >= omega[0]) & (ds.omega <= omega[1])
+
+    if R is not None: # Mask based on R values
+        mask &= (ds.R >= R[0]) & (ds.R <= R[1])
+
+    if Ro is not None: # Mask based on Ro values
+        mask &= (ds.Ro >= Ro[0]) & (ds.Ro <= Ro[1])
+
+    if dt_P_range is not None: # Mask based on dt_P values
+        mask &= (ds.dt_P >= dt_P_range[0]) & (ds.dt_P <= dt_P_range[1])
 
     if debug: # Random debug info because I keep breaking stuff
         print('Debug info if using ids: this is a vector of the matches found ' + str(np.isin(ds.coords['ids'][ds.traj.isin(ids)], ids)))
@@ -1053,13 +1122,16 @@ def drift_meta(ds, op_type: str = 'd'):
     start_lat = ds.latitude[traj_index].values
     start_lon = ds.longitude[traj_index].values
     start_time = ds.time[traj_index].values
-    end_time = ds.time[trajsum-1].values
+    end_time = ds.time[trajsum - 1].values # Get the end time for each trajectory
     #end_time = ds.end_date.values
 
     # Extract the WMO and ID identifiers for each drifter
     # These values will be used to create the dataframe
     #Find Identifiers
-    WMO = ds.WMO.values
+    try:
+        WMO = ds.WMO[traj_index].values
+    except:
+        WMO = ds.ID.values
     ID = ds.ID.values
 
     # Set the columns and rows for the dataframe
@@ -2286,7 +2358,7 @@ def disp_tensor(ds, sub_mean: bool = False, res: any = 0.25, domain = [145,165,-
     return new_ds
 
 
-def lagrangian_autocorr(velocities_list, u, v):
+def lagrangian_autocorr(velocities_list=None, u=None, v=None, Ps=None, times=None, T_L=10):
     """
     Calculate the Lagrangian autocorrelation for a list of velocity arrays.
     
@@ -2302,30 +2374,62 @@ def lagrangian_autocorr(velocities_list, u, v):
     autocorrs = []
     zonals = []
     merids = []
+    crosscorrs = []
+
+    # Calculate oscillatory term based on component
+    if Ps is not None: # Note: we generally assume P is given as 2pi / |omega|
+        if isinstance(Ps[0], np.ndarray):
+            pass
+        else:
+            Ps = [Ps[0]]
+        for i, P in enumerate(Ps):
+            if isinstance(times[i], np.ndarray):
+                times_i = times[i]
+            else:
+                times_i = times
+            times_i = times_i / 3600 / 24
+            #if times_i[1] >= 21500:
+            #    times_i = times_i / 21600 / 24
+            #elif times_i[1] >= 3500:
+            #    times_i = times_i / 3600 / 24
+            #elif times_i[1] <= 3500:
+            #    pass
+            exp_term = np.exp(-times_i / T_L)
+            autocorr = np.cos((2*np.pi*times_i)/P) * exp_term
+            crosscorr = np.sin((2*np.pi*times_i)/P) * exp_term
+            autocorrs.append(autocorr)
+            crosscorrs.append(crosscorr)
+    else:
+        for i, velocities in enumerate(velocities_list):
+            N = len(velocities)
     
-    for i, velocities in tqdm(enumerate(velocities_list)):
-        N = len(velocities)
-        mean_velocity = np.nanmean(velocities)
-        mean_zonal = np.nanmean(u[i])
-        mean_merid = np.nanmean(v[i])
+            mean_velocity = np.nanmean(velocities)
+            mean_zonal = np.nanmean(u[i])
+            mean_merid = np.nanmean(v[i])
 
-        centered_velocities = velocities - mean_velocity
-        centered_zonal = u[i] - mean_zonal
-        centered_merids = v[i] - mean_merid
-        
-        autocorr = np.correlate(centered_velocities, centered_velocities, mode='full') / (N * np.var(velocities))
-        autocorr = autocorr[N - 1:]
-        autocorrs.append(autocorr)
+            centered_velocities = velocities - mean_velocity
+            centered_zonal = u[i] - mean_zonal
+            centered_merids = v[i] - mean_merid
 
-        zonal = np.correlate(centered_zonal, centered_zonal, mode='full') / (N * np.var(u[i]))
-        zonal = zonal[N - 1:]
-        zonals.append(zonal)
+            # Lagrangian autocorrelation
+            autocorr = np.correlate(centered_velocities, centered_velocities, mode='full') / (N * np.nanvar(velocities))
+            autocorr = autocorr[N - 1:]
+            autocorrs.append(autocorr)
 
-        merid = np.correlate(centered_merids, centered_merids, mode='full') / (N * np.var(v[i]))
-        merid = merid[N - 1:]
-        merids.append(merid)
-    
-    return autocorrs, zonals, merids
+            zonal = np.correlate(centered_zonal, centered_zonal, mode='full') / (N * np.nanvar(u[i]))
+            zonal = zonal[N - 1:]
+            zonals.append(zonal)
+
+            merid = np.correlate(centered_merids, centered_merids, mode='full') / (N * np.nanvar(v[i]))
+            merid = merid[N - 1:]
+            merids.append(merid)
+
+            # Zonal-meridional cross-correlation
+            cross = np.correlate(centered_zonal, centered_merids, mode='full') / (N * np.nanstd(u[i]) * np.nanstd(v[i]))
+            cross = cross[N - 1:]  # Keep only non-negative lags
+            crosscorrs.append(cross)
+
+    return autocorrs, zonals, merids, crosscorrs
 
 
 def plot_autocorrelations(velocities_list, u_list, v_list, times_list, max_x=20):
@@ -3265,8 +3369,8 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
                    components: bool = True, total: bool = True,
                    title = '', log: bool = True, max_dt = 100,
                    disp_funcs: dict = {}, best_fit: bool = False,
-                   cmap: any = None, norm: any = None,
-                   ci: bool = True, theoretical: bool = False) -> plt.figure:
+                   cmap: any = None, norm: any = None, xlim = [0, 300], ylim = [0.005, 50000000],
+                   ci: bool = True, theoretical: bool = False, kwargs: any = None) -> plt.figure:
     ''' Creates plots of absolute (A2) and relative (D2) dispersal.
         Also has the option to plot mean trendlines or to not plot
         scatter points (i.e., only plot trendlines). 
@@ -3302,7 +3406,6 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
         #       variables are callable in the same way
     elif ds is not None:
         df_bool = False
-        
         if cmap is None: # Create a coloUr map if required
             cmap, norm = traj_cmap(ds.traj.values)
 
@@ -3316,9 +3419,6 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
             # Create discrete color map for color bar
             ylab = 'Relative dispersion ($Km^2$)' # Change plot labels and title
             title = 'Relative ' + title
-            #cmap = plt.cm.get_cmap("tab20", len(df.ID_marker.unique())) # NOTE: that we also use the new name for ID_marker
-            #norm = colors.BoundaryNorm(range(len(df.ID_marker.unique()) + 1), cmap.N)
-            
             ax.scatter(
                 (df.dt.values) / 3600 / 24, # Very neat because ChatGPT did it
                 df.D2.values,
@@ -3331,11 +3431,13 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
             ylab = 'Absoluute dispersion ($Km^2$)' 
             traj_idx, traj_sum = get_traj_index(ds)
             for i, traj in enumerate(ds.ID.values):
-                ax.plot(ds.dt[slice(traj_idx[i], traj_sum[i])].values / 3600 / 24, abs(ds.A2[slice(traj_idx[i], traj_sum[i])].values),
+                dts = ds.dt[slice(traj_idx[i], traj_sum[i])].values
+                if dts[1] >= 21500:
+                    dts = dts / 21600 / 24
+                else:
+                    dts = dts / 3600 / 24
+                ax.plot(dts, abs(ds.A2[slice(traj_idx[i], traj_sum[i])].values),
                         c='gainsboro', lw=0.5, zorder=0.5, alpha=0.7)
-            #scatter = plt.scatter((ds.dt.values)/3600/24, ds.A2.values,
-            #                s=0.5, c='gainsboro', alpha=0.5)
-
     else:
         if df_bool:
             ylab = 'Relative dispersion (Km$^2$)' # Change plot labels and title
@@ -3343,10 +3445,15 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
             ylab = 'Absolute dispersion (Km$^2$)' 
 
     # Find time intervals to average over
-    unique_x_values = np.unique((ds.dt.values)/3600/24)
+    dts = ds.dt.values
+    if ds.dt[1].values >= 21500:
+        unique_x_values = np.unique((ds.dt.values)/21600/24)
+        dts = dts / 21600 / 24
+    else:
+        unique_x_values = np.unique((ds.dt.values)/3600/24)
+        dts = dts / 3600 / 24
     non_zeros = np.logical_and((unique_x_values > 0), (unique_x_values < max_dt))
     unique_x_values = unique_x_values[non_zeros]
-    #print(unique_x_values, len(unique_x_values))
 
     if total:
         # Calculate the mean dispersion and plot it as solid line
@@ -3355,7 +3462,7 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
         ci_upper = []
 
         for x_value in unique_x_values:
-            values = abs(ds.A2.values[(ds.dt.values)/3600/24 == x_value])
+            values = abs(ds.A2.values[dts == x_value])
             mean_A2_value = np.nanmean(values)
             mean_A2_values.append(mean_A2_value)
 
@@ -3368,36 +3475,34 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
                 ci_upper.append(upper_bound)
 
         mean_A2_values = np.array(mean_A2_values)
-        ax.plot(unique_x_values, mean_A2_values, color='black', linestyle='solid', label='Total', linewidth=1.5)
+        if kwargs is not None:
+            ax.plot(unique_x_values, mean_A2_values, **kwargs)
+        else:
+            ax.plot(unique_x_values, mean_A2_values, color='black', linestyle='solid', label='Total', linewidth=1.5)
 
         if ci:
             ci_lower = np.array(ci_lower)
             ci_upper = np.array(ci_upper)
             ax.fill_between(unique_x_values, ci_lower, ci_upper, color='gainsboro', alpha=1, linewidth=0.5)
 
-            #ax.scatter(unique_x_values, mean_plus,
-            #        color='gainsboro', alpha=0.5, s=0.5)
-            #ax.scatter(unique_x_values, mean_minus,
-            #        color='blue', alpha=0.5, s=0.5)
-
     if components:
         # Calculate mean meridional dispersion at each x value
         mean_x2_values = []
         for x_value in unique_x_values:
-            mean_x2_value = np.nanmean(ds.disp_x2.values[(ds.dt.values)/3600/24 == x_value])
+            mean_x2_value = np.nanmean(ds.disp_x2.values[dts == x_value])
             mean_x2_values.append(mean_x2_value)
         ax.plot(unique_x_values, mean_x2_values,
                 color='black', linestyle='dashed',
-                label='Zonal', linewidth=1.5, alpha=1)
+                label='Zonal', linewidth=1, alpha=1)
 
         # Calculate mean zonal dispersion at each x value
         mean_disp_y2_values = []
         for x_value in unique_x_values:
-            mean_disp_y2_value = np.nanmean(ds.disp_y2.values[(ds.dt.values)/3600/24 == x_value])
+            mean_disp_y2_value = np.nanmean(ds.disp_y2.values[dts == x_value])
             mean_disp_y2_values.append(mean_disp_y2_value)
         ax.plot(unique_x_values, mean_disp_y2_values,
                 color='black', linestyle='dotted',
-                label='Meridional', linewidth=1.5, alpha=1)
+                label='Meridional', linewidth=1, alpha=1)
     
     ### POWER LAW FUNCTION ###
     def t_funcs(time, b, a: any = 1000, exp: bool = False):
@@ -3409,37 +3514,24 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
             return a * np.exp(b * np.array(time))
         else:
             return a * (np.array(time) ** b)
-    
-    #def log_formatter(val, pos):
-    #    return f'{10**val:.0f}'
-
+        
     results = [] # Initialise results outside of condition so that function still returns something
     if bool(disp_funcs): # Show theoretical slopes on plot
         for count, f_type in enumerate(disp_funcs):
             if disp_funcs[f_type]['range'][1] != disp_funcs[f_type]['range'][0]: # If the range is the same, then it won't plot
                 # Extract desired time range and y values to plot 
                 t_vals = [t for t in unique_x_values if disp_funcs[f_type]['range'][0] <= t <= disp_funcs[f_type]['range'][1]]
-                t_vals_idx = np.isin((ds.dt.values/3600/24), t_vals)
+                t_vals_idx = np.isin((dts), t_vals)
                 t_vals_idx = np.where(t_vals_idx)[0]
-                test_t_vals = (ds.dt.values/3600/24)[t_vals_idx]
+                test_t_vals = (dts)[t_vals_idx]
                 test_y_vals = ds.A2.values[t_vals_idx] # Extract dispersion vals
 
                 # Find line of best fit
                 print(f_type)
-
                 if ((df_bool) and (f_type == 'exp:f0')): # Automatically add an exponential for relative dispersal
                     reg_results, fitted_vals = fit_trends(x=test_t_vals, y=test_y_vals, plot=False, exp=True)
-
-                    #if theoretical:
-                    #    ## Find theoretical distribution
-                    #    theoretical_vals = t_funcs(a=reg_results['intercept'][0] + 1000, time=t_vals + disp_funcs[f_type]['range'][0], b=disp_funcs[f_type]['power'], exp=True)
-
                 else:
                     reg_results, fitted_vals = fit_trends(x=test_t_vals, y=test_y_vals, plot=False)
-
-                    #if theoretical:
-                    #    # Find theoretical distribution
-                    #    theoretical_vals = t_funcs(a=reg_results['intercept'][0] + 1000, time=t_vals  + disp_funcs[f_type]['range'][0], b=disp_funcs[f_type]['power'])
 
                 # Add in regression line        
                 if best_fit:
@@ -3481,20 +3573,10 @@ def dispersal_plot(ds: any = None, df: any = None, scatter: bool = True,
         #ax.yaxis.set_major_formatter(FuncFormatter(log_formatter))
     ax.set_xlabel('Time (Days)')
     ax.set_ylabel(ylab)
-    if scatter:
-        #cbar = plt.colorbar(mappable=plt.cm.ScalarMappable(cmap=cmap, norm=norm), cax=cax,
-        #                            orientation="vertical", ticks=np.arange(len(np.unique(ds.ID.values))) + 0.5)
-        #cbar.set_label("ID")
-        #unique_ids = np.unique(ds.ID.values)
-        #cbar.ax.set_yticklabels(unique_ids)
-            
-        #cbar.ax.set_yticklabels(np.unique(ds.ID.values)) # Using unique here and above to remove repeated labels
-        #                                                 # in the dataframe if it is supplied
-        pass
 
     cax.remove()
-    plt.xlim(0, 300)
-    plt.ylim(0.005, 50000000)
+    plt.xlim(xlim)
+    plt.ylim(ylim)
     plt.show()
 
     return fig

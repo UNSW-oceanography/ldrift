@@ -74,6 +74,7 @@ class create_ragged_arr:
         self.id = np.zeros(nb_traj, dtype='<U20')
         self.deploy_lat = np.zeros(nb_traj, dtype='float32')
         self.deploy_lon = np.zeros(nb_traj, dtype='float32')
+        self.WMO = np.zeros(nb_traj, dtype='int64')
         
         # values defined at every observation (timestep)
         self.longitude = np.zeros(nb_obs, dtype='float32')
@@ -90,6 +91,7 @@ class create_ragged_arr:
         self.lonres = np.zeros(nb_obs, dtype='float32')
         self.u_res = np.zeros(nb_obs, dtype='float32')
         self.v_res = np.zeros(nb_obs, dtype='float32')
+        self.drogue_lost_date = np.zeros(nb_obs, dtype='datetime64[s]')
         
         # sst data set
         self.sst = np.zeros(nb_obs, dtype='float32')
@@ -106,6 +108,7 @@ class create_ragged_arr:
         self.phi = np.zeros(nb_obs, dtype='float32')
         self.psi = np.zeros(nb_obs, dtype='float32')
         self.zo = np.zeros(nb_obs, dtype='complex128')
+        self.Ls = np.zeros(nb_obs, dtype='float32')
 
     def fill_ragged_array(self, record, tid, oid):
         '''
@@ -122,6 +125,7 @@ class create_ragged_arr:
         self.id[tid] = str(ds.ID.data[0])
         self.deploy_lon[tid] = ds.deploy_lon.data[0]
         self.deploy_lat[tid] = ds.deploy_lat.data[0]
+        self.WMO[tid] = (str(ds.WMO.data[0])) if 'WMO' in ds else -1
         
         # vectors
         self.longitude[oid:oid+size] = ds.longitude.data[0]
@@ -151,6 +155,8 @@ class create_ragged_arr:
         except: pass
         try: self.v_res[oid:oid+size] = ds.v_res.data[0]
         except: pass
+        try: self.drogue_lost_date[oid:oid+size] = ds.drogue_lost_date.data[0]
+        except: pass
 
         # Signal paramaters
         try: self.div[oid:oid+size] = ds.div.data[0]
@@ -175,6 +181,8 @@ class create_ragged_arr:
         except: pass
         try: self.zo[oid:oid+size] = ds.zo.data[0]
         except: pass
+        try: self.Ls[oid:oid+size] = ds.Ls.data[0]
+        except: pass
 
     def to_xarray(self):
         ds = xr.Dataset(
@@ -182,11 +190,13 @@ class create_ragged_arr:
                 rowsize=(['traj'], self.rowsize, {'long_name': 'Number of observations per trajectory', 'sample_dimension': 'obs', 'units':'-'}),
                 deploy_lon=(['traj'], self.deploy_lon, {'long_name': 'Deployment longitude', 'units':'degrees_east'}),
                 deploy_lat=(['traj'], self.deploy_lat, {'long_name': 'Deployment latitude', 'units':'degrees_north'}),
+                WMO=(['traj'], self.WMO, {'long_name': 'World Meteorological Organization ID', 'units':'-'}),
                 
                 # position and velocity
                 dt_diff=(['obs'], self.dt_diff, {'long_name': 'Time interval between previous and next location', 'units':'s'}),
                 ve=(['obs'], self.ve, {'long_name': 'Eastward velocity', 'units':'m/s'}),
                 vn=(['obs'], self.vn, {'long_name': 'Northward velocity', 'units':'m/s'}),
+                drogue_lost_date=(['obs'], self.drogue_lost_date, {'long_name': 'Date when drogue was lost', 'units':'-'}),
                 latres=(['obs'], self.latres, {'long_name': 'Latitude resolution', 'units':'degrees_north'}),
                 lonres=(['obs'], self.lonres, {'long_name': 'Longitude resolution', 'units':'degrees_east'}),
                 u_res=(['obs'], self.u_res, {'long_name': 'Eastward residual velocity', 'units':'m/s'}),
@@ -209,6 +219,7 @@ class create_ragged_arr:
                 phi=(['obs'], self.phi, {'long_name': 'Ellipse phase', 'units':'-'}),
                 psi=(['obs'], self.psi, {'long_name': 'Particle position in ellipse', 'units':'-'}),
                 zo=(['obs'], self.zo, {'long_name': 'Ellipse center', 'units':'-'}),
+                Ls=(['obs'], self.Ls, {'long_name': 'Eddy scale', 'units':'Km'}),
              ),
 
             coords=dict(
@@ -220,7 +231,7 @@ class create_ragged_arr:
             ),
 
             attrs={
-                'title': 'Global Drifter Program hourly drifting buoy collection',
+                'title': 'Global Drifter Program drifting buoy collection',
                 'date_created': datetime.now().isoformat(),
             }
         )

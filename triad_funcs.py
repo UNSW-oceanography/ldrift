@@ -10,9 +10,11 @@ import pandas as pd
 from collections import defaultdict
 
 # Others #
-from datetime import datetime
+import datetime as datetime
 import os
 from tqdm import tqdm
+from haversine import haversine
+from scipy.optimize import least_squares
 
 # visualization #
 import matplotlib.pyplot as plt
@@ -201,6 +203,32 @@ def triad_datasets(ds: xr.Dataset, chance_triads_df: pd.DataFrame, max_delta=30)
 def triangle_pars(lat1, lon1, lat2, lon2, lat3, lon3):
     # Check if all drifters are active
     # if any drifter isn't active, return NA
+    """
+    Calculate properties of a triangle formed by three lagrangian drifters.
+
+    Parameters
+    ----------
+    lat1, lon1, lat2, lon2, lat3, lon3 : float
+        The latitude and longitude of the three drifters.
+
+    Returns
+    -------
+    triangle_area : float
+        The area of the triangle in km^2.
+    lambda_ratio : float
+        The ratio of the area of the triangle to the square of the perimeter.
+    max_angle : float
+        The maximum angle of the triangle in degrees.
+    f : float
+        The Coriolis factor in rad/hr.
+    center_lat, center_lon : float
+        The center latitude and longitude of the triangle.
+
+    Notes
+    -----
+
+    If any of the input coordinates are NaN, the function will return NaN for all output values.
+    """
     if np.isnan(lat1) or np.isnan(lon1) or np.isnan(lat2) or np.isnan(lon2) or np.isnan(lat3) or np.isnan(lon3):
         triangle_area = np.nan
         lambda_ratio = np.nan
@@ -243,6 +271,150 @@ def triangle_pars(lat1, lon1, lat2, lon2, lat3, lon3):
     return triangle_area, lambda_ratio, max_angle, f, center_lat, center_lon
 
 
+def triangle_pars_ls(lats, lons, times):
+    """
+    Calculate divergence and vorticity using the least squares (LS) method from Essink et al 2022.
+    Used as an alternative method to the area rate of change method used in 'triangle_pars'.
+    
+    Parameters:
+    -----------
+    lats : list of numpy.ndarray
+        List of latitude arrays, where each array corresponds to a single drifter's positions over time.
+        Must contain at least 3 drifter trajectories.
+    lons : list of numpy.ndarray
+        List of longitude arrays, where each array corresponds to a single drifter's positions over time.
+        Must contain at least 3 drifter trajectories.
+    times : numpy.ndarray
+        Array of timestamps corresponding to the positions.
+        
+    Returns:
+    --------
+    pandas.DataFrame
+        DataFrame containing the calculated time series of:
+        - divergence (d): horizontal divergence in s^-1
+        - vorticity (z): vertical component of relative vorticity in s^-1
+        - strain_rate (S): lateral strain rate in s^-1
+        - time: timestamps for each calculation
+        - f: Coriolis factor in R s^-1
+    """
+    # Validate inputs
+    if len(lats) != len(lons):
+        raise ValueError("Number of latitude arrays must match number of longitude arrays")
+    
+    if len(lats) < 3:
+        raise ValueError("At least 3 drifter trajectories are required")
+    
+    for i in range(len(lats)):
+        if len(lats[i]) != len(times) or len(lons[i]) != len(times):
+            raise ValueError(f"Drifter {i} position arrays must have the same length as times array")
+    
+    n_drifters = len(lats)
+    n_times = len(times)
+    
+    # Pre-allocate arrays for results
+    divergence = np.zeros(n_times)
+    vorticity = np.zeros(n_times)
+    strain_rate = np.zeros(n_times)
+    f = np.zeros(n_times)
+    
+    # Process each time step
+    for t in range(n_times):
+        # Extract current positions of all drifters
+        current_lats = np.array([lats[i][t] for i in range(n_drifters)])
+        current_lons = np.array([lons[i][t] for i in range(n_drifters)])
+        
+        # Calculate velocities (m/s) for each drifter
+        if t > 0:
+            dt = (times[t] - times[t-1])  # Time difference in seconds
+            
+            # Calculate velocities in m/s using haversine formula
+            u = np.zeros(n_drifters)  # East-west velocity
+            v = np.zeros(n_drifters)  # North-south velocity
+            
+            for i in range(n_drifters):
+                # Calculate distance in east-west direction
+                dx = haversine((lats[i][t-1], lons[i][t-1]), (lats[i][t-1], lons[i][t])) * 1000  # in meters
+                if lons[i][t] < lons[i][t-1]:  # Moving westward
+                    dx = -dx
+                
+                # Calculate distance in north-south direction
+                dy = haversine((lats[i][t-1], lons[i][t-1]), (lats[i][t], lons[i][t-1])) * 1000  # in meters
+                if lats[i][t] < lats[i][t-1]:  # Moving southward
+                    dy = -dy
+                
+                # Velocities
+                u[i] = dx / dt
+                v[i] = dy / dt
+            
+            # Calculate center of mass
+            x_cm = np.mean(current_lons)
+            y_cm = np.mean(current_lats)
+            
+            # Create the distance matrix Q as in Eq. (6) and (7)
+            # We use relative positions in meters from center of mass
+            Q = np.zeros((n_drifters, 3))
+            Q[:, 0] = 1  # First column is all ones
+            
+            for i in range(n_drifters):
+                # Calculate x-distance (east-west) from center of mass in meters
+                Q[i, 1] = haversine((y_cm, x_cm), (y_cm, current_lons[i])) * 1000
+                if current_lons[i] < x_cm:  # West of center of mass
+                    Q[i, 1] = -Q[i, 1]
+                
+                # Calculate y-distance (north-south) from center of mass in meters
+                Q[i, 2] = haversine((y_cm, x_cm), (current_lats[i], x_cm)) * 1000
+                if current_lats[i] < y_cm:  # South of center of mass
+                    Q[i, 2] = -Q[i, 2]
+            
+            # Compute the least squares solution for u and v components
+            # C_u = (u, du/dx, du/dy) and C_v = (v, dv/dx, dv/dy)
+            # as in Eqs. (6) and (7) in Essink et al., 2022
+            C_u, _, _, _ = np.linalg.lstsq(Q, u, rcond=None)
+            C_v, _, _, _ = np.linalg.lstsq(Q, v, rcond=None)
+            
+            # Extract the velocity gradients
+            du_dx = C_u[1]  # du/dx
+            du_dy = C_u[2]  # du/dy
+            dv_dx = C_v[1]  # dv/dx
+            dv_dy = C_v[2]  # dv/dy
+            
+            # Calculate divergence, vorticity, and strain rate
+            # Divergence: d = du/dx + dv/dy
+            divergence[t] = du_dx + dv_dy
+            
+            # Vorticity: z = dv/dx - du/dy
+            vorticity[t] = dv_dx - du_dy
+            
+            # Strain rates
+            shear_strain = dv_dx + du_dy  # S_s
+            normal_strain = du_dx - dv_dy  # S_n
+            
+            # Lateral strain rate: S = sqrt(S_s^2 + S_n^2)
+            strain_rate[t] = np.sqrt(shear_strain**2 + normal_strain**2)
+
+            # Coriolis factor
+            omega = 7.2921159e-5
+            f[t] = 2 * omega * np.sin(np.radians(y_cm))# Raidians per second
+        
+        else:
+            # For the first time step, we can't calculate velocities
+            divergence[t] = np.nan
+            vorticity[t] = np.nan
+            strain_rate[t] = np.nan
+            f[t] = np.nan
+    
+    # Create DataFrame with results
+    results = pd.DataFrame({
+        'time': times,
+        'd': divergence,  # Divergence (s^-1)
+        'z': vorticity,   # Vorticity (s^-1)
+        'S': strain_rate,  # Strain rate (s^-1)
+        'f': f # Coriolis factor (s^-1)
+    })
+    
+    return results
+
+
 def trig_pars_from_ds(triad_ds):
 
     idx, n = ld.get_traj_index(ds=triad_ds)
@@ -270,19 +442,21 @@ def trig_pars_from_ds(triad_ds):
     # Calculate divergence
     A_inv = 1 / np.array(areas)
     dA = np.diff(areas)
-    diff_dt = np.diff(dt / 3600)
+    diff_dt = np.diff(dt / 3600 / 24)
     dAdt = np.append(0, dA / diff_dt)
-    D = A_inv * dAdt
+    D = A_inv * (dAdt)
     
     return pd.DataFrame({'time': time, 'dt': dt, 'area': areas,
     'lambda_ratio': ratios, 'max_angle': angles, 'divergence': D,
     'f': fs, 'center_lat': latbars, 'center_lon': lonbars})
 
 
-def lambda_qc(df, columns_to_filter=None, threshold=0.2):
+def lambda_qc(df, columns_to_filter=None, threshold=0.4):
     '''
     Filters out specific values from specified columns in a dataframe where the corresponding
-    lambda ratio exceeds a threshold value.
+    lambda ratio exceeds a threshold value. That is, for triangle parameter time-series, any
+    time a triad becomes co-linear (i.e., lambda ~< 0.4) DKP estimates become inaccurate, so
+    we remove these values from the time-series.
     
     Parameters:
     -----------
@@ -297,6 +471,10 @@ def lambda_qc(df, columns_to_filter=None, threshold=0.2):
     --------
     pandas.DataFrame
         Copy of input dataframe with values set to nan where lambda ratio exceeds threshold
+
+    notes:
+    ------
+    - If no columns specified, filters all columns except lambda_ratio
     '''
     # Create a copy of the input dataframe
     new_df = df.copy()
@@ -316,7 +494,8 @@ def lambda_qc(df, columns_to_filter=None, threshold=0.2):
 
 
 def plot_triangles(lat_lon_arrays, domain: list = [145, 175, -45, -15], borders: bool = True,
-                   cvec: any = 'blue', bathy: any = None):
+                   cvec: any = 'blue', bathy: any = None, fill: bool = False, step: int = 1,
+                   center: bool = True):
     '''
     Function to plot triangles formed by drifters onto a map
     
@@ -331,7 +510,7 @@ def plot_triangles(lat_lon_arrays, domain: list = [145, 175, -45, -15], borders:
     cvec : any, optional
         Colours to be used for the triangles
     bathy : any, optional
-        Bathymetry data to be used for the contours
+        Bathymetry data to be used for background contours
         
     Returns:
     --------
@@ -352,7 +531,7 @@ def plot_triangles(lat_lon_arrays, domain: list = [145, 175, -45, -15], borders:
     >>> fig = triad_funcs.plot_triangles(lat_lon_arrays, domain=[151, 153, -33, -32])
     >>> fig.show()
     '''
-    fig = plt.figure(figsize=(10, 6))
+    fig = plt.figure(figsize=(5, 4), dpi=125)
     ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
 
     # Set the map extent based on the specified region
@@ -374,9 +553,18 @@ def plot_triangles(lat_lon_arrays, domain: list = [145, 175, -45, -15], borders:
     # Create colour map and apply to 'cvec'
     cmap = cmocean.cm.speed
     norm = colors.Normalize(vmin=-1, vmax=1)
-
     alpha = 0.65  # Initial alpha value
-    for i in range(0, len(lat_lon_arrays[0]), 3):
+
+    print(len(lat_lon_arrays))
+    x_cm = np.zeros(len(lat_lon_arrays[0]))
+    y_cm = np.zeros(len(lat_lon_arrays[0]))
+    for i in range(len(lat_lon_arrays[0])):
+        x_cm[i] = np.nanmean([lat_lon_arrays[1][i], lat_lon_arrays[3][i], lat_lon_arrays[5][i]])
+        y_cm[i] = np.nanmean([lat_lon_arrays[0][i], lat_lon_arrays[2][i], lat_lon_arrays[4][i]])
+    #print(x_cm)
+    #print(y_cm)
+
+    for i in range(0, len(lat_lon_arrays[0]),step):
         try:
             lats = [lat_lon_array[i] for lat_lon_array in lat_lon_arrays[::2]]
             lons = [lat_lon_array[i] for lat_lon_array in lat_lon_arrays[1::2]]
@@ -384,37 +572,58 @@ def plot_triangles(lat_lon_arrays, domain: list = [145, 175, -45, -15], borders:
             print('IndexError at i = ', i, e)
             break
 
-        for j in range(len(lats)):
-            triangle = plt.Polygon([(lons[j], lats[j]),
-                                    (lons[(j + 1) % len(lats)], lats[(j + 1) % len(lats)]),
-                                    (lons[(j + 2) % len(lats)], lats[(j + 2) % len(lats)])],
-                                    edgecolor='black', facecolor=cmap(norm(cvec[j])), transform=ccrs.PlateCarree(),
-                                    alpha=alpha
-                                    )
-            ax.add_patch(triangle)
+        for j in range(0,len(lats),3):
+            if fill is True:
+                triangle = plt.Polygon([(lons[j], lats[j]),
+                                        (lons[(j + 1) % len(lats)], lats[(j + 1) % len(lats)]),
+                                        (lons[(j + 2) % len(lats)], lats[(j + 2) % len(lats)])],
+                                        edgecolor='k', facecolor=cmap(norm(cvec[j])), transform=ccrs.PlateCarree(),
+                                        alpha=alpha, linestyle='solid', linewidth=0.5
+                                        )
+                ax.add_patch(triangle)
+                #alpha -= 0.1  # Reduce alpha for the next triangle
+            elif fill is False:
+                triangle = plt.Polygon([(lons[j], lats[j]),
+                                        (lons[(j + 1) % len(lats)], lats[(j + 1) % len(lats)]),
+                                        (lons[(j + 2) % len(lats)], lats[(j + 2) % len(lats)])],
+                                        edgecolor='k', facecolor='None', transform=ccrs.PlateCarree(),
+                                        linestyle='solid', linewidth=0.5)
+                ax.add_patch(triangle)
 
-            #alpha -= 0.1  # Reduce alpha for the next triangle
+        temp_cmap = np.array(['#1f77b4', '#ff7f0e', '#2ca02c'])
+        ax.scatter(lons[j], lats[j], c=temp_cmap[j%3], s=1, transform=ccrs.PlateCarree())
+        ax.scatter(lons[(j + 1) % len(lats)], lats[(j + 1) % len(lats)], c=temp_cmap[(j + 1)%3],
+                    s=1, transform=ccrs.PlateCarree())
+        ax.scatter(lons[(j + 2) % len(lats)], lats[(j + 2) % len(lats)], c=temp_cmap[(j + 2)%3],
+                    s=1, transform=ccrs.PlateCarree())
 
-    # Add coloUr bar
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, label='Normalized Divergence')
+    if center is True:
+        ax.plot(x_cm, y_cm, c='k', transform=ccrs.PlateCarree(),
+        linestyle='dotted', linewidth=0.5, zorder=10,
+        label='Center of Mass')
+        
+    if fill is True:
+        # Add coloUr bar
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, label='Normalized Divergence')
 
     # Set the displayed region
     if domain:
         ax.set_extent(domain, crs=ccrs.PlateCarree())
-        ax.set_xticks(np.arange(domain[0],domain[1],5), crs=ccrs.PlateCarree())
-        ax.set_yticks(np.arange(domain[2],domain[3],5), crs=ccrs.PlateCarree())
+        ax.set_xticks(np.arange(domain[0],domain[1],0.5), crs=ccrs.PlateCarree())
+        ax.set_yticks(np.arange(domain[3],domain[2],0.5), crs=ccrs.PlateCarree())
 
-    ax.set_title('Drifter Triad Time Series')
-    ax.xaxis.set_major_formatter(LongitudeFormatter())
-    ax.yaxis.set_major_formatter(LatitudeFormatter())
+    #ax.legend()
+    #ax.set_title('Drifter Triad Time Series')
+    #ax.xaxis.set_major_formatter(LongitudeFormatter())
+    #ax.yaxis.set_major_formatter(LatitudeFormatter())
     return fig
 
 
-
-def animate_triangles(lat_lon_arrays, domain: list = [145, 175, -45, -15],
-                      borders: bool = True, save_path: str = any, cvec: any = 'blue',
+def animate_triangles(lat_lon_arrays, time, domain: list = [145, 175, -45, -15],
+                      borders: bool = True, save_path: str = any,
+                      cvec: any = 'blue', fill: bool = False, center: bool = True,
                       bathy: any = None, framerate = 30):
     ''' Function to create an animation of triangles formed by drifters over time'''
 
@@ -439,33 +648,65 @@ def animate_triangles(lat_lon_arrays, domain: list = [145, 175, -45, -15],
 
     alpha = 0.65  # Initial alpha value
 
-    def update(frame):
-        #ax.clear()  # Clear the previous frame
+    def update(frame, fill: bool = False):
+        ax.clear()  # Clear the previous frame
 
         lats = [lat_lon_array[frame] for lat_lon_array in lat_lon_arrays[::2]]
         lons = [lat_lon_array[frame] for lat_lon_array in lat_lon_arrays[1::2]]
 
-        # Create colour map and apply to 'cvec'
-        cmap = cmocean.cm.speed
-        norm = colors.Normalize(vmin=-3, vmax=3)
-        for j in range(len(lats)):
-            triangle = plt.Polygon([(lons[j], lats[j]),
-                                    (lons[(j + 1) % len(lats)], lats[(j + 1) % len(lats)]),
-                                    (lons[(j + 2) % len(lats)], lats[(j + 2) % len(lats)])],
-                                    edgecolor='black', facecolor=cmap(norm(cvec[j])), transform=ccrs.PlateCarree(),
-                                    alpha=alpha
-                                    )
-            ax.add_patch(triangle)
+        
+        if fill is True:
+            cmap = cmocean.cm.speed
+            norm = colors.Normalize(vmin=-3, vmax=3)
+            for j in range(0,len(lats),8):
+                triangle = plt.Polygon([(lons[j], lats[j]),
+                                        (lons[(j + 1) % len(lats)], lats[(j + 1) % len(lats)]),
+                                        (lons[(j + 2) % len(lats)], lats[(j + 2) % len(lats)])],
+                                        edgecolor='black', facecolor=cmap(norm(cvec[j])), transform=ccrs.PlateCarree(),
+                                        alpha=alpha
+                                        )
+                ax.add_patch(triangle)
+        elif fill is False:
+            for j in range(0,len(lats),8):
+                triangle = plt.Polygon([(lons[j], lats[j]),
+                                        (lons[(j + 1) % len(lats)], lats[(j + 1) % len(lats)]),
+                                        (lons[(j + 2) % len(lats)], lats[(j + 2) % len(lats)])],
+                                        edgecolor='black', facecolor='none', transform=ccrs.PlateCarree(),
+                                        alpha=alpha
+                                        )
+                ax.add_patch(triangle)
+
+        temp_cmap = np.array(['#1f77b4', '#ff7f0e', '#2ca02c'])
+        ax.scatter(lons[j], lats[j], c=temp_cmap[j%3], s=1, transform=ccrs.PlateCarree())
+        ax.scatter(lons[(j + 1) % len(lats)], lats[(j + 1) % len(lats)], c=temp_cmap[(j + 1)%3],
+                    s=1, transform=ccrs.PlateCarree())
+        ax.scatter(lons[(j + 2) % len(lats)], lats[(j + 2) % len(lats)], c=temp_cmap[(j + 2)%3],
+                    s=1, transform=ccrs.PlateCarree())
+            
+        if center is True:
+            for j in range(len(lats)):
+                x_cm = np.nanmean([lons[j], lons[(j + 1) % len(lats)], lons[(j + 2) % len(lats)]])
+                y_cm = np.nanmean([lats[j], lats[(j + 1) % len(lats)], lats[(j + 2) % len(lats)]])
+                ax.scatter(x_cm, y_cm, c='k', s=5,transform=ccrs.PlateCarree())
 
         # Set the displayed region
         if domain:
             ax.set_extent(domain, crs=ccrs.PlateCarree())
-            ax.set_xticks(np.arange(domain[0],domain[1],5), crs=ccrs.PlateCarree())
-            ax.set_yticks(np.arange(domain[2],domain[3],5), crs=ccrs.PlateCarree())
+            ax.set_xticks(np.arange(domain[0],domain[1],0.5), crs=ccrs.PlateCarree())
+            ax.set_yticks(np.arange(domain[3],domain[2],0.5), crs=ccrs.PlateCarree())
 
-        ax.set_title(f'Drifter Triad at timestep {frame}')
-        ax.xaxis.set_major_formatter(LongitudeFormatter())
-        ax.yaxis.set_major_formatter(LatitudeFormatter())
+        #ax.set_title(f'Drifter Triad at timestep {frame}')
+        #ax.xaxis.set_major_formatter(LongitudeFormatter())
+        #ax.yaxis.set_major_formatter(LatitudeFormatter())
+
+        seconds = float(time[frame])
+        time_delta = datetime.timedelta(seconds=seconds)
+        days = time_delta.days
+        seconds_remaining = time_delta.seconds
+        hours, remainder = divmod(seconds_remaining, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        time_format = f'{days} days, {hours}:{minutes}:{seconds}'
+        ax.text(0.02, 0.95, time_format, transform=ax.transAxes, fontsize=12, fontweight="bold")
 
     anim = FuncAnimation(fig, update, frames=len(lat_lon_arrays[0]), repeat=False, blit=False)
 
